@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -10,14 +11,30 @@ from core.db import Database
 from core.items import (
     active_habits,
     apply_memory_control,
+    archive_habit_manual,
+    archive_reminder_manual,
+    archive_task_manual,
+    complete_task_manual,
     create_action,
     create_event,
+    create_habit_manual,
+    create_reminder_manual,
+    create_task_manual,
+    delete_event_manual,
     due_tasks,
+    get_event_manual,
+    get_habit_manual,
+    get_reminder_manual,
+    get_task_manual,
     habit_completion_status,
     list_actions,
     list_events,
+    list_habits_manual,
+    list_reminders_manual,
+    list_tasks_manual,
     open_threads,
     pending_reminders,
+    dismiss_reminder_manual,
     record_habit_completion,
     resolve_thread,
     sophie_cancel_confirmed_event,
@@ -27,6 +44,9 @@ from core.items import (
     sophie_patch_confirmed_action,
     sophie_patch_confirmed_event,
     todays_schedule,
+    update_habit_manual,
+    update_reminder_manual,
+    update_task_manual,
     update_action,
     update_event,
 )
@@ -112,6 +132,55 @@ class MemoryControlRequest(BaseModel):
     target_id: str | None = None
     target_type: str
     note: str | None = None
+
+
+class FrontendManualCreateRequest(BaseModel):
+    tenantId: str | None = None
+    userId: str
+    title: str
+    notes: str | None = None
+    dueAt: str | None = None
+    remindAt: str | None = None
+    startsAt: str | None = None
+    endsAt: str | None = None
+    timezone: str | None = None
+    location: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    priority: str | None = None
+    sourceType: str | None = None
+    sourceRef: str | None = None
+    idempotencyKey: str
+    createdFrom: str
+    cadence: str | None = None
+
+
+class FrontendManualPatchRequest(BaseModel):
+    userId: str
+    title: str | None = None
+    notes: str | None = None
+    dueAt: str | None = None
+    remindAt: str | None = None
+    startsAt: str | None = None
+    endsAt: str | None = None
+    timezone: str | None = None
+    location: str | None = None
+    participants: list[str] | None = None
+    priority: str | None = None
+    sourceType: str | None = None
+    sourceRef: str | None = None
+    idempotencyKey: str | None = None
+    createdFrom: str
+    completedAt: str | None = None
+    cadence: str | None = None
+
+
+class FrontendManualMutationRequest(BaseModel):
+    userId: str
+    sourceType: str | None = None
+    sourceRef: str | None = None
+    idempotencyKey: str | None = None
+    createdFrom: str
+    completedAt: str | None = None
 
 
 def _is_sophie_confirmed_payload(payload: dict[str, Any]) -> bool:
@@ -252,6 +321,253 @@ async def get_actions(
     return await list_actions(database, user_id=user_id, status=status, limit=limit)
 
 
+@app.get("/v3/tasks")
+async def get_tasks(
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    return await list_tasks_manual(database, user_id=str(user_id or userId))
+
+
+@app.post("/v3/tasks")
+async def post_tasks_manual(
+    request: FrontendManualCreateRequest,
+    database: Database = Depends(get_database),
+):
+    return await create_task_manual(
+        database,
+        user_id=request.userId,
+        title=request.title,
+        notes=request.notes,
+        due_at=request.dueAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        idempotency_key=request.idempotencyKey,
+        tenant_id=request.tenantId,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+    )
+
+
+@app.get("/v3/tasks/{item_id}")
+async def get_task_detail(
+    item_id: str,
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await get_task_manual(database, user_id=str(user_id or userId), item_id=UUID(item_id))
+
+
+@app.patch("/v3/tasks/{item_id}")
+async def patch_task_manual(
+    item_id: str,
+    request: FrontendManualPatchRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await update_task_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        title=request.title,
+        notes=request.notes,
+        due_at=request.dueAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.post("/v3/tasks/{item_id}/complete")
+async def complete_task_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await complete_task_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+        completed_at=request.completedAt,
+    )
+
+
+@app.post("/v3/tasks/{item_id}/archive")
+async def archive_task_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_task_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.delete("/v3/tasks/{item_id}")
+async def delete_task_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_task_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.get("/v3/reminders")
+async def get_reminders(
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    return await list_reminders_manual(database, user_id=str(user_id or userId))
+
+
+@app.post("/v3/reminders")
+async def post_reminders_manual(
+    request: FrontendManualCreateRequest,
+    database: Database = Depends(get_database),
+):
+    return await create_reminder_manual(
+        database,
+        user_id=request.userId,
+        title=request.title,
+        notes=request.notes,
+        remind_at=request.remindAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        idempotency_key=request.idempotencyKey,
+        tenant_id=request.tenantId,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+    )
+
+
+@app.get("/v3/reminders/{item_id}")
+async def get_reminder_detail(
+    item_id: str,
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await get_reminder_manual(database, user_id=str(user_id or userId), item_id=UUID(item_id))
+
+
+@app.patch("/v3/reminders/{item_id}")
+async def patch_reminder_manual(
+    item_id: str,
+    request: FrontendManualPatchRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await update_reminder_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        title=request.title,
+        notes=request.notes,
+        remind_at=request.remindAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.post("/v3/reminders/{item_id}/dismiss")
+async def dismiss_reminder_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await dismiss_reminder_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.post("/v3/reminders/{item_id}/archive")
+async def archive_reminder_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_reminder_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.delete("/v3/reminders/{item_id}")
+async def delete_reminder_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_reminder_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
 @app.post("/v3/actions")
 async def post_actions(
     request: dict[str, Any] = Body(...),
@@ -360,6 +676,18 @@ async def get_events(
     return await list_events(database, user_id=user_id, status=status, limit=limit)
 
 
+@app.get("/v3/events/{item_id}")
+async def get_event_detail(
+    item_id: str,
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await get_event_manual(database, user_id=str(user_id or userId), item_id=UUID(item_id))
+
+
 @app.post("/v3/events")
 async def post_events(
     request: dict[str, Any] = Body(...),
@@ -451,6 +779,25 @@ async def cancel_event(
     )
 
 
+@app.delete("/v3/events/{item_id}")
+async def delete_event_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await delete_event_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
 @app.get("/v3/ops/schedule/today")
 async def get_todays_schedule(
     user_id: str,
@@ -485,6 +832,72 @@ async def get_active_habits(
     return await active_habits(database, user_id=user_id)
 
 
+@app.get("/v3/habits")
+async def get_habits(
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    return await list_habits_manual(database, user_id=str(user_id or userId))
+
+
+@app.post("/v3/habits")
+async def post_habits_manual(
+    request: FrontendManualCreateRequest,
+    database: Database = Depends(get_database),
+):
+    return await create_habit_manual(
+        database,
+        user_id=request.userId,
+        title=request.title,
+        notes=request.notes,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        cadence=request.cadence,
+        screen=request.createdFrom,
+        idempotency_key=request.idempotencyKey,
+        tenant_id=request.tenantId,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+    )
+
+
+@app.get("/v3/habits/{item_id}")
+async def get_habit_detail(
+    item_id: str,
+    user_id: str | None = None,
+    userId: str | None = None,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await get_habit_manual(database, user_id=str(user_id or userId), item_id=UUID(item_id))
+
+
+@app.patch("/v3/habits/{item_id}")
+async def patch_habit_manual(
+    item_id: str,
+    request: FrontendManualPatchRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await update_habit_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        title=request.title,
+        notes=request.notes,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        cadence=request.cadence,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
 @app.get("/v3/ops/habits/status")
 async def get_habit_completion_status(
     user_id: str,
@@ -505,17 +918,68 @@ async def get_open_threads(
 @app.patch("/v3/habits/{item_id}/complete")
 async def patch_habit_complete(
     item_id: str,
-    request: HabitCompletionRequest,
+    request: dict[str, Any] = Body(...),
     database: Database = Depends(get_database),
 ):
     from uuid import UUID
 
+    if "userId" in request:
+        return await record_habit_completion(
+            database,
+            user_id=str(request["userId"]),
+            item_id=UUID(item_id),
+            completed_at=str(request.get("completedAt") or datetime.now(timezone.utc).isoformat()),
+            status="habit_completed",
+            source_type=str(request.get("sourceType") or "frontend_manual"),
+            screen=str(request.get("createdFrom") or "habits_tab"),
+            source_ref=request.get("sourceRef"),
+            idempotency_key=request.get("idempotencyKey"),
+        )
+    typed = HabitCompletionRequest.model_validate(request)
     return await record_habit_completion(
         database,
-        user_id=request.user_id,
+        user_id=typed.user_id,
         item_id=UUID(item_id),
-        completed_at=request.completed_at,
-        status=request.status,
+        completed_at=typed.completed_at,
+        status=typed.status,
+    )
+
+
+@app.post("/v3/habits/{item_id}/archive")
+async def archive_habit_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_habit_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.delete("/v3/habits/{item_id}")
+async def delete_habit_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await archive_habit_manual(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
     )
 
 

@@ -1195,7 +1195,7 @@ def _event_type_for_completion(kind: str) -> str:
     return "task_completed"
 
 
-async def _fetch_fact_by_idempotency_key(database: Database, *, user_id: str, idempotency_key: str) -> dict[str, Any] | None:
+async def _fetch_fact_by_idempotency_key(database: Database, *, user_id: str, idempotency_key: str, writer: str) -> dict[str, Any] | None:
     if hasattr(database, "confirmed_facts"):
         rows = getattr(database, "confirmed_facts")
         values = rows.values() if isinstance(rows, dict) else rows
@@ -1203,7 +1203,7 @@ async def _fetch_fact_by_idempotency_key(database: Database, *, user_id: str, id
             if row["user_id"] != user_id:
                 continue
             created_from = row.get("created_from") or {}
-            if created_from.get("writer") == "sophie_confirmed_action" and created_from.get("idempotency_key") == idempotency_key:
+            if created_from.get("writer") == writer and created_from.get("idempotency_key") == idempotency_key:
                 return row
         return None
     return await _db_fetchone(
@@ -1212,12 +1212,13 @@ async def _fetch_fact_by_idempotency_key(database: Database, *, user_id: str, id
         SELECT *
         FROM confirmed_facts
         WHERE user_id = $1
-          AND created_from->>'writer' = 'sophie_confirmed_action'
-          AND created_from->>'idempotency_key' = $2
+          AND created_from->>'writer' = $2
+          AND created_from->>'idempotency_key' = $3
         ORDER BY last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
         LIMIT 1
         """,
         user_id,
+        writer,
         idempotency_key,
     )
 
@@ -1320,6 +1321,248 @@ def _sophie_response(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _frontend_manual_response(row: dict[str, Any]) -> dict[str, Any]:
+    content = row.get("content") or {}
+    metadata = content.get("metadata") or {}
+    created_from = row.get("created_from") or {}
+    return {
+        "id": str(row["id"]),
+        "kind": _kind_for_row(row),
+        "type": row.get("fact_type"),
+        "title": content.get("title"),
+        "notes": content.get("summary"),
+        "status": _fact_item_status(row),
+        "dueAt": row.get("due_at").isoformat() if isinstance(row.get("due_at"), datetime) else row.get("due_at"),
+        "remindAt": row.get("remind_at").isoformat() if isinstance(row.get("remind_at"), datetime) else row.get("remind_at"),
+        "startsAt": row.get("starts_at").isoformat() if isinstance(row.get("starts_at"), datetime) else row.get("starts_at"),
+        "endsAt": row.get("ends_at").isoformat() if isinstance(row.get("ends_at"), datetime) else row.get("ends_at"),
+        "timezone": row.get("timezone"),
+        "priority": row.get("priority"),
+        "location": metadata.get("location"),
+        "participants": metadata.get("participants") or [],
+        "createdAt": str(row.get("first_seen_at") or row.get("created_at") or ""),
+        "updatedAt": str(row.get("last_seen_at") or row.get("created_at") or ""),
+        "sourceType": row.get("source_type"),
+        "createdFrom": created_from.get("screen") if isinstance(created_from, dict) else created_from,
+    }
+
+
+def _manual_created_from(*, screen: str, tenant_id: str | None, idempotency_key: str | None, source_ref: str | None) -> dict[str, Any]:
+    return {
+        "writer": "frontend_manual",
+        "screen": screen,
+        "tenant_id": tenant_id,
+        "idempotency_key": idempotency_key,
+        "source_ref": source_ref,
+    }
+
+
+def _manual_action_content(
+    *,
+    fact_type: str,
+    title: str,
+    notes: str | None,
+    due_at: str | None,
+    remind_at: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    source_type: str,
+) -> dict[str, Any]:
+    content = _sophie_content(
+        fact_type=fact_type,
+        title=title,
+        notes=notes,
+        due_at=due_at,
+        remind_at=remind_at,
+        starts_at=None,
+        ends_at=None,
+        timezone_name=timezone_name,
+        location=None,
+        participants=None,
+        source_type=source_type,
+        provenance_summary=None,
+        original_text=notes,
+        source_ref=None,
+    )
+    content["priority"] = priority
+    content["importance"] = priority
+    content["salience"] = priority
+    content["urgency"] = priority
+    return content
+
+
+def _manual_event_content(
+    *,
+    title: str,
+    notes: str | None,
+    starts_at: str | None,
+    ends_at: str | None,
+    timezone_name: str | None,
+    location: str | None,
+    participants: list[str] | None,
+    priority: str | None,
+    source_type: str,
+) -> dict[str, Any]:
+    content = _sophie_content(
+        fact_type="event",
+        title=title,
+        notes=notes,
+        due_at=None,
+        remind_at=None,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        timezone_name=timezone_name,
+        location=location,
+        participants=participants,
+        source_type=source_type,
+        provenance_summary=None,
+        original_text=notes,
+        source_ref=None,
+    )
+    content["priority"] = priority
+    content["importance"] = priority
+    content["salience"] = priority
+    content["urgency"] = priority
+    return content
+
+
+def _manual_habit_content(
+    *,
+    title: str,
+    notes: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    cadence: str | None,
+    source_type: str,
+) -> dict[str, Any]:
+    content = _manual_action_content(
+        fact_type="habit",
+        title=title,
+        notes=notes,
+        due_at=None,
+        remind_at=None,
+        timezone_name=timezone_name,
+        priority=priority,
+        source_type=source_type,
+    )
+    content.setdefault("metadata", {})["agent_item"] = {
+        **(content.get("metadata", {}).get("agent_item") or {}),
+        "is_habit": True,
+        "cadence": cadence,
+        "recurrence": cadence,
+    }
+    content["time"]["recurrence_rule"] = cadence
+    return content
+
+
+async def _manual_list_by_kind(database: Database, *, user_id: str, kind: str, fact_types: list[str]) -> dict[str, Any]:
+    rows = await _fetch_confirmed_facts(database, user_id=user_id, fact_types=fact_types)
+    items = []
+    for row in rows:
+        if _kind_for_row(row) != kind:
+            continue
+        if row.get("status") == "corrected":
+            continue
+        items.append(_frontend_manual_response(row))
+    items.sort(key=lambda item: item.get("updatedAt") or "", reverse=True)
+    return {"items": items}
+
+
+async def _manual_get_by_kind(database: Database, *, user_id: str, item_id: UUID, kind: str, fact_types: list[str]) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") not in fact_types or _kind_for_row(row) != kind:
+        raise HTTPException(status_code=404, detail=f"{kind.title()} not found.")
+    return _frontend_manual_response(row)
+
+
+async def _manual_create_fact(
+    database: Database,
+    *,
+    user_id: str,
+    fact_type: str,
+    domain: str,
+    content: dict[str, Any],
+    confidence: float,
+    source_type: str,
+    screen: str,
+    tenant_id: str | None,
+    source_ref: str | None,
+    idempotency_key: str,
+    event_type: str,
+) -> dict[str, Any]:
+    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key, writer="frontend_manual")
+    if existing:
+        return _frontend_manual_response(existing)
+    source_uuid = _uuid_from_ref(source_ref, fallback=idempotency_key)
+    row = await _insert_confirmed_fact(
+        database,
+        user_id=user_id,
+        fact_type=fact_type,
+        domain=domain,
+        content=content,
+        confidence=confidence,
+        source_ids=[source_uuid],
+        status="active",
+        source_type=source_type,
+        who_said_it="user",
+        channel=source_type,
+        created_from=_manual_created_from(screen=screen, tenant_id=tenant_id, idempotency_key=idempotency_key, source_ref=source_ref),
+    )
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type=event_type,
+        timeline_type="calendar" if fact_type == "event" else "user_life",
+        title=content.get("title") or fact_type.title(),
+        summary=content.get("summary") or content.get("title") or "",
+        source_id=source_uuid,
+        related_fact_ids=[row["id"]],
+        confidence=confidence,
+    )
+    return _frontend_manual_response(row)
+
+
+async def _manual_mutate_fact(
+    database: Database,
+    *,
+    row: dict[str, Any],
+    source_type: str,
+    screen: str,
+    source_ref: str | None,
+    idempotency_key: str | None,
+    event_type: str | None,
+) -> dict[str, Any]:
+    created_from = row.setdefault("created_from", {})
+    if isinstance(created_from, dict) and idempotency_key and created_from.get("last_mutation_idempotency_key") == idempotency_key:
+        return _frontend_manual_response(row)
+    if isinstance(created_from, dict):
+        created_from["writer"] = "frontend_manual"
+        created_from["screen"] = screen
+        created_from["source_ref"] = source_ref
+        if idempotency_key:
+            created_from["last_mutation_idempotency_key"] = idempotency_key
+    row["source_type"] = source_type
+    row["who_said_it"] = "user"
+    row["channel"] = source_type
+    row["last_seen_at"] = _now_naive()
+    row["last_confirmed_at"] = row["last_seen_at"]
+    _refresh_operational_row(row, item_type=row["fact_type"], source_id=row["source_ids"][0] if row.get("source_ids") else None, source_ids=row.get("source_ids"))
+    await _update_fact_record(database, row)
+    if event_type:
+        await _insert_timeline_event(
+            database,
+            user_id=row["user_id"],
+            event_type=event_type,
+            timeline_type="calendar" if row.get("fact_type") == "event" else "user_life",
+            title=(row.get("content") or {}).get("title") or row.get("fact_type", "item").title(),
+            summary=(row.get("content") or {}).get("summary") or "",
+            source_id=row["source_ids"][0] if row.get("source_ids") else None,
+            related_fact_ids=[row["id"]],
+            confidence=row["confidence"],
+        )
+    return _frontend_manual_response(row)
+
+
 async def sophie_create_confirmed_action(
     database: Database,
     *,
@@ -1340,7 +1583,7 @@ async def sophie_create_confirmed_action(
     location: str | None = None,
     tenant_id: str | None = None,
 ) -> dict[str, Any]:
-    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key)
+    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key, writer="sophie_confirmed_action")
     if existing:
         return _sophie_response(existing)
 
@@ -1545,7 +1788,7 @@ async def sophie_create_confirmed_event(
     original_text: str | None = None,
     tenant_id: str | None = None,
 ) -> dict[str, Any]:
-    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key)
+    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key, writer="sophie_confirmed_action")
     if existing:
         return _sophie_response(existing)
     source_uuid = _uuid_from_ref(source_ref, fallback=idempotency_key)
@@ -1708,6 +1951,388 @@ async def sophie_cancel_confirmed_event(
         confidence=fact["confidence"],
     )
     return _sophie_response(fact)
+
+
+async def list_tasks_manual(database: Database, *, user_id: str) -> dict[str, Any]:
+    return await _manual_list_by_kind(database, user_id=user_id, kind="task", fact_types=["task"])
+
+
+async def get_task_manual(database: Database, *, user_id: str, item_id: UUID) -> dict[str, Any]:
+    return await _manual_get_by_kind(database, user_id=user_id, item_id=item_id, kind="task", fact_types=["task"])
+
+
+async def create_task_manual(
+    database: Database,
+    *,
+    user_id: str,
+    title: str,
+    notes: str | None,
+    due_at: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    screen: str,
+    idempotency_key: str,
+    tenant_id: str | None = None,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+) -> dict[str, Any]:
+    content = _manual_action_content(
+        fact_type="task",
+        title=title,
+        notes=notes,
+        due_at=due_at,
+        remind_at=None,
+        timezone_name=timezone_name,
+        priority=priority,
+        source_type=source_type,
+    )
+    return await _manual_create_fact(
+        database,
+        user_id=user_id,
+        fact_type="task",
+        domain="obligations",
+        content=content,
+        confidence=1.0,
+        source_type=source_type,
+        screen=screen,
+        tenant_id=tenant_id,
+        source_ref=source_ref,
+        idempotency_key=idempotency_key,
+        event_type="task_created",
+    )
+
+
+async def update_task_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    title: str | None,
+    notes: str | None,
+    due_at: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "task" or _kind_for_row(row) != "task":
+        raise HTTPException(status_code=404, detail="Task not found.")
+    content = row["content"]
+    if title is not None:
+        content["title"] = title
+    if notes is not None:
+        content["summary"] = notes
+        content.setdefault("evidence", {})["raw_evidence"] = notes
+    content.setdefault("time", {})
+    if due_at is not None:
+        content["time"]["due_date"] = due_at
+    if timezone_name is not None:
+        content["time"]["timezone"] = timezone_name
+    if priority is not None:
+        content["priority"] = priority
+        content["importance"] = priority
+        content["salience"] = priority
+        content["urgency"] = priority
+    row["content"] = content
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="task_updated")
+
+
+async def complete_task_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+    completed_at: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "task" or _kind_for_row(row) != "task":
+        raise HTTPException(status_code=404, detail="Task not found.")
+    row["status"] = "historical"
+    row["content"].setdefault("metadata", {})["item_status"] = "completed"
+    row["content"] = apply_lifecycle_timestamp(row["content"], completed_at=completed_at or _now_naive().replace(tzinfo=timezone.utc).isoformat())
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="task_completed")
+
+
+async def archive_task_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "task" or _kind_for_row(row) != "task":
+        raise HTTPException(status_code=404, detail="Task not found.")
+    row["status"] = "historical"
+    row["content"].setdefault("metadata", {})["item_status"] = "archived"
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="task_archived")
+
+
+async def list_reminders_manual(database: Database, *, user_id: str) -> dict[str, Any]:
+    return await _manual_list_by_kind(database, user_id=user_id, kind="reminder", fact_types=["reminder"])
+
+
+async def get_reminder_manual(database: Database, *, user_id: str, item_id: UUID) -> dict[str, Any]:
+    return await _manual_get_by_kind(database, user_id=user_id, item_id=item_id, kind="reminder", fact_types=["reminder"])
+
+
+async def create_reminder_manual(
+    database: Database,
+    *,
+    user_id: str,
+    title: str,
+    notes: str | None,
+    remind_at: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    screen: str,
+    idempotency_key: str,
+    tenant_id: str | None = None,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+) -> dict[str, Any]:
+    content = _manual_action_content(
+        fact_type="reminder",
+        title=title,
+        notes=notes,
+        due_at=None,
+        remind_at=remind_at,
+        timezone_name=timezone_name,
+        priority=priority,
+        source_type=source_type,
+    )
+    return await _manual_create_fact(
+        database,
+        user_id=user_id,
+        fact_type="reminder",
+        domain="obligations",
+        content=content,
+        confidence=1.0,
+        source_type=source_type,
+        screen=screen,
+        tenant_id=tenant_id,
+        source_ref=source_ref,
+        idempotency_key=idempotency_key,
+        event_type="reminder_created",
+    )
+
+
+async def update_reminder_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    title: str | None,
+    notes: str | None,
+    remind_at: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "reminder" or _kind_for_row(row) != "reminder":
+        raise HTTPException(status_code=404, detail="Reminder not found.")
+    content = row["content"]
+    if title is not None:
+        content["title"] = title
+    if notes is not None:
+        content["summary"] = notes
+        content.setdefault("evidence", {})["raw_evidence"] = notes
+    content.setdefault("time", {})
+    if remind_at is not None:
+        content["time"]["reminder_at"] = remind_at
+    if timezone_name is not None:
+        content["time"]["timezone"] = timezone_name
+    if priority is not None:
+        content["priority"] = priority
+        content["importance"] = priority
+        content["salience"] = priority
+        content["urgency"] = priority
+    row["content"] = content
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="reminder_updated")
+
+
+async def dismiss_reminder_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "reminder" or _kind_for_row(row) != "reminder":
+        raise HTTPException(status_code=404, detail="Reminder not found.")
+    row["status"] = "dismissed"
+    row["content"].setdefault("metadata", {})["item_status"] = "dismissed"
+    row["content"] = apply_lifecycle_timestamp(row["content"], cancelled_at=_now_naive().replace(tzinfo=timezone.utc).isoformat())
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="reminder_dismissed")
+
+
+async def archive_reminder_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "reminder" or _kind_for_row(row) != "reminder":
+        raise HTTPException(status_code=404, detail="Reminder not found.")
+    row["status"] = "historical"
+    row["content"].setdefault("metadata", {})["item_status"] = "archived"
+    row["content"] = apply_lifecycle_timestamp(row["content"], cancelled_at=_now_naive().replace(tzinfo=timezone.utc).isoformat())
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="reminder_archived")
+
+
+async def get_event_manual(database: Database, *, user_id: str, item_id: UUID) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "event":
+        raise HTTPException(status_code=404, detail="Event not found.")
+    return _frontend_manual_response(row)
+
+
+async def delete_event_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "event":
+        raise HTTPException(status_code=404, detail="Event not found.")
+    row["status"] = "dismissed"
+    row["content"].setdefault("metadata", {})["item_status"] = "cancelled"
+    row["content"] = apply_lifecycle_timestamp(row["content"], cancelled_at=_now_naive().replace(tzinfo=timezone.utc).isoformat())
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="event_cancelled")
+
+
+async def list_habits_manual(database: Database, *, user_id: str) -> dict[str, Any]:
+    return await _manual_list_by_kind(database, user_id=user_id, kind="habit", fact_types=["habit"])
+
+
+async def get_habit_manual(database: Database, *, user_id: str, item_id: UUID) -> dict[str, Any]:
+    return await _manual_get_by_kind(database, user_id=user_id, item_id=item_id, kind="habit", fact_types=["habit"])
+
+
+async def create_habit_manual(
+    database: Database,
+    *,
+    user_id: str,
+    title: str,
+    notes: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    cadence: str | None,
+    screen: str,
+    idempotency_key: str,
+    tenant_id: str | None = None,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+) -> dict[str, Any]:
+    content = _manual_habit_content(
+        title=title,
+        notes=notes,
+        timezone_name=timezone_name,
+        priority=priority,
+        cadence=cadence,
+        source_type=source_type,
+    )
+    return await _manual_create_fact(
+        database,
+        user_id=user_id,
+        fact_type="habit",
+        domain="habits",
+        content=content,
+        confidence=1.0,
+        source_type=source_type,
+        screen=screen,
+        tenant_id=tenant_id,
+        source_ref=source_ref,
+        idempotency_key=idempotency_key,
+        event_type="habit_created",
+    )
+
+
+async def update_habit_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    title: str | None,
+    notes: str | None,
+    timezone_name: str | None,
+    priority: str | None,
+    cadence: str | None,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "habit" or _kind_for_row(row) != "habit":
+        raise HTTPException(status_code=404, detail="Habit not found.")
+    content = row["content"]
+    if title is not None:
+        content["title"] = title
+    if notes is not None:
+        content["summary"] = notes
+        content.setdefault("evidence", {})["raw_evidence"] = notes
+    content.setdefault("time", {})
+    if timezone_name is not None:
+        content["time"]["timezone"] = timezone_name
+    if cadence is not None:
+        content["time"]["recurrence_rule"] = cadence
+        content.setdefault("metadata", {}).setdefault("agent_item", {})["cadence"] = cadence
+        content["metadata"]["agent_item"]["recurrence"] = cadence
+        content["metadata"]["agent_item"]["is_habit"] = True
+    if priority is not None:
+        content["priority"] = priority
+        content["importance"] = priority
+        content["salience"] = priority
+        content["urgency"] = priority
+    row["content"] = content
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="habit_updated")
+
+
+async def archive_habit_manual(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    screen: str,
+    source_type: str = "frontend_manual",
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    row = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not row or row.get("fact_type") != "habit" or _kind_for_row(row) != "habit":
+        raise HTTPException(status_code=404, detail="Habit not found.")
+    row["status"] = "historical"
+    row["content"].setdefault("metadata", {})["item_status"] = "archived"
+    return await _manual_mutate_fact(database, row=row, source_type=source_type, screen=screen, source_ref=source_ref, idempotency_key=idempotency_key, event_type="habit_archived")
 
 
 async def _confirm_candidate_as_fact(
@@ -1938,13 +2563,34 @@ async def update_event(
     raise HTTPException(status_code=404, detail="Event not found.")
 
 
-async def record_habit_completion(database: Database, *, user_id: str, item_id: UUID, completed_at: str, status: str = "habit_completed") -> dict[str, Any]:
+async def record_habit_completion(
+    database: Database,
+    *,
+    user_id: str,
+    item_id: UUID,
+    completed_at: str,
+    status: str = "habit_completed",
+    source_type: str | None = None,
+    screen: str | None = None,
+    source_ref: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
     fact = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
     if not fact or _kind_for_row(fact) != "habit":
         raise HTTPException(status_code=404, detail="Habit not found.")
+    fact["content"] = apply_lifecycle_timestamp(fact["content"], completed_at=completed_at)
+    if source_type or screen or source_ref or idempotency_key:
+        return await _manual_mutate_fact(
+            database,
+            row=fact,
+            source_type=source_type or fact.get("source_type") or "frontend_manual",
+            screen=screen or "habits_tab",
+            source_ref=source_ref,
+            idempotency_key=idempotency_key,
+            event_type=status,
+        )
     fact["last_seen_at"] = _now_naive()
     fact["last_confirmed_at"] = fact["last_seen_at"]
-    fact["content"] = apply_lifecycle_timestamp(fact["content"], completed_at=completed_at)
     _refresh_operational_row(fact, item_type=fact.get("fact_type") or "habit", source_id=fact["source_ids"][0] if fact.get("source_ids") else None, source_ids=fact.get("source_ids"))
     await _update_fact_record(database, fact)
     await _insert_timeline_event(

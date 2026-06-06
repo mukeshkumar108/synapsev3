@@ -66,7 +66,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-    CREATE TYPE event_type AS ENUM ('task_confirmed', 'event_confirmed', 'fact_learned', 'state_change', 'session', 'outreach_sent', 'item_dismissed', 'user_correction', 'relationship_update', 'task_completed', 'reminder_dismissed', 'habit_completed', 'habit_missed', 'habit_partial', 'thread_resolved', 'task_created', 'reminder_created', 'event_created', 'task_archived', 'event_updated', 'event_cancelled');
+    CREATE TYPE event_type AS ENUM ('task_confirmed', 'event_confirmed', 'fact_learned', 'state_change', 'session', 'outreach_sent', 'item_dismissed', 'user_correction', 'relationship_update', 'task_completed', 'reminder_dismissed', 'habit_completed', 'habit_missed', 'habit_partial', 'thread_resolved', 'task_created', 'reminder_created', 'event_created', 'task_archived', 'event_updated', 'event_cancelled', 'task_updated', 'reminder_updated', 'reminder_archived', 'habit_created', 'habit_updated', 'habit_archived');
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
@@ -82,6 +82,12 @@ ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'event_created';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'task_archived';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'event_updated';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'event_cancelled';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'task_updated';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'reminder_updated';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'reminder_archived';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_created';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_updated';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_archived';
 
 DO $$ BEGIN
     CREATE TYPE timeline_type AS ENUM ('interaction', 'user_life', 'calendar', 'relationship', 'system');

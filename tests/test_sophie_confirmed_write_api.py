@@ -107,11 +107,12 @@ class FakeDatabase:
             user_id = args[0]
             rows = [row for row in self.confirmed_facts.values() if row["user_id"] == user_id]
             if "created_from->>'writer'" in query:
-                idempotency_key = args[1]
+                writer = args[1]
+                idempotency_key = args[2]
                 return [
                     row
                     for row in rows
-                    if (row.get("created_from") or {}).get("writer") == "sophie_confirmed_action"
+                    if (row.get("created_from") or {}).get("writer") == writer
                     and (row.get("created_from") or {}).get("idempotency_key") == idempotency_key
                 ][:1]
             return rows
