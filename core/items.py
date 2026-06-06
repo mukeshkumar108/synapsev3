@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException
 
@@ -23,6 +23,10 @@ def _now_naive() -> datetime:
 def _to_naive(value: str | None) -> datetime | None:
     parsed = parse_datetime(value)
     return parsed.replace(tzinfo=None) if parsed else None
+
+
+def _uuid_from_ref(value: str | None, *, fallback: str) -> UUID:
+    return uuid5(NAMESPACE_URL, value or fallback)
 
 
 def _row_provenance(
@@ -1189,6 +1193,521 @@ def _event_type_for_completion(kind: str) -> str:
     if kind == "thread":
         return "thread_resolved"
     return "task_completed"
+
+
+async def _fetch_fact_by_idempotency_key(database: Database, *, user_id: str, idempotency_key: str) -> dict[str, Any] | None:
+    if hasattr(database, "confirmed_facts"):
+        rows = getattr(database, "confirmed_facts")
+        values = rows.values() if isinstance(rows, dict) else rows
+        for row in values:
+            if row["user_id"] != user_id:
+                continue
+            created_from = row.get("created_from") or {}
+            if created_from.get("writer") == "sophie_confirmed_action" and created_from.get("idempotency_key") == idempotency_key:
+                return row
+        return None
+    return await _db_fetchone(
+        database,
+        """
+        SELECT *
+        FROM confirmed_facts
+        WHERE user_id = $1
+          AND created_from->>'writer' = 'sophie_confirmed_action'
+          AND created_from->>'idempotency_key' = $2
+        ORDER BY last_seen_at DESC NULLS LAST, first_seen_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        user_id,
+        idempotency_key,
+    )
+
+
+def _sophie_content(
+    *,
+    fact_type: str,
+    title: str,
+    notes: str | None,
+    due_at: str | None,
+    remind_at: str | None,
+    starts_at: str | None,
+    ends_at: str | None,
+    timezone_name: str | None,
+    location: str | None,
+    participants: list[str] | None,
+    source_type: str,
+    provenance_summary: str | None,
+    original_text: str | None,
+    source_ref: str | None,
+) -> dict[str, Any]:
+    item_type = "event" if fact_type == "event" else "task"
+    summary = notes or title
+    return {
+        "schema_version": "v1",
+        "item_type": item_type,
+        "title": title,
+        "summary": summary,
+        "salience": None,
+        "priority": None,
+        "urgency": None,
+        "importance": None,
+        "sensitivity": "low",
+        "time": {
+            "due_date": due_at if fact_type in {"task", "reminder"} else None,
+            "reminder_at": remind_at,
+            "date": starts_at if fact_type == "event" else None,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "timezone": timezone_name,
+            "duration": None,
+            "follow_up_after_hours": None,
+            "stale_after_hours": None,
+            "expires_at": None,
+        },
+        "links": {
+            "people": participants or [],
+            "projects": [location] if location else [],
+            "topics": [],
+            "related_facts": [],
+            "related_threads": [],
+        },
+        "lifecycle": {
+            "follow_up_after_hours": None,
+            "stale_after_hours": None,
+            "expires_at": None,
+        },
+        "evidence": {
+            "raw_evidence": original_text or provenance_summary or summary,
+            "source_turn_refs": [source_ref] if source_ref else [],
+        },
+        "metadata": {
+            "internal_source": source_type,
+            "requires_confirmation": False,
+            "item_status": "active",
+            "location": location,
+            "participants": participants or [],
+            "provenance_summary": provenance_summary,
+            "source_ref": source_ref,
+            "agent_item": {
+                "title": title,
+                "summary": summary,
+                "location": location,
+                "participants": participants or [],
+                "raw_evidence": original_text or provenance_summary or summary,
+            },
+        },
+    }
+
+
+def _sophie_response(row: dict[str, Any]) -> dict[str, Any]:
+    content = row.get("content") or {}
+    metadata = content.get("metadata") or {}
+    return {
+        "id": str(row["id"]),
+        "kind": _kind_for_row(row),
+        "type": row.get("fact_type"),
+        "title": content.get("title"),
+        "notes": content.get("summary"),
+        "status": _fact_item_status(row),
+        "dueAt": row.get("due_at").isoformat() if isinstance(row.get("due_at"), datetime) else row.get("due_at"),
+        "remindAt": row.get("remind_at").isoformat() if isinstance(row.get("remind_at"), datetime) else row.get("remind_at"),
+        "startsAt": row.get("starts_at").isoformat() if isinstance(row.get("starts_at"), datetime) else row.get("starts_at"),
+        "endsAt": row.get("ends_at").isoformat() if isinstance(row.get("ends_at"), datetime) else row.get("ends_at"),
+        "timezone": row.get("timezone"),
+        "createdAt": str(row.get("first_seen_at") or row.get("created_at") or ""),
+        "updatedAt": str(row.get("last_seen_at") or row.get("created_at") or ""),
+        "location": metadata.get("location"),
+        "participants": metadata.get("participants") or [],
+    }
+
+
+async def sophie_create_confirmed_action(
+    database: Database,
+    *,
+    user_id: str,
+    kind: str,
+    title: str,
+    notes: str | None,
+    due_at: str | None,
+    remind_at: str | None,
+    timezone_name: str | None,
+    source_type: str,
+    provenance_summary: str | None,
+    confidence: float,
+    source_ref: str | None,
+    idempotency_key: str,
+    original_text: str | None = None,
+    participants: list[str] | None = None,
+    location: str | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key)
+    if existing:
+        return _sophie_response(existing)
+
+    fact_type = "reminder" if kind == "reminder" else "task"
+    source_uuid = _uuid_from_ref(source_ref, fallback=idempotency_key)
+    content = _sophie_content(
+        fact_type=fact_type,
+        title=title,
+        notes=notes,
+        due_at=due_at,
+        remind_at=remind_at,
+        starts_at=None,
+        ends_at=None,
+        timezone_name=timezone_name,
+        location=location,
+        participants=participants,
+        source_type=source_type,
+        provenance_summary=provenance_summary,
+        original_text=original_text,
+        source_ref=source_ref,
+    )
+    row = await _insert_confirmed_fact(
+        database,
+        user_id=user_id,
+        fact_type=fact_type,
+        domain="obligations",
+        content=content,
+        confidence=confidence,
+        source_ids=[source_uuid],
+        status="active",
+        source_type=source_type,
+        who_said_it="user",
+        channel=source_type,
+        created_from={
+            "writer": "sophie_confirmed_action",
+            "mode": "confirmed_write",
+            "writer_kind": kind,
+            "tenant_id": tenant_id,
+            "source_ref": source_ref,
+            "idempotency_key": idempotency_key,
+            "provenance_summary": provenance_summary,
+        },
+    )
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type="reminder_created" if fact_type == "reminder" else "task_created",
+        timeline_type="user_life",
+        title=title,
+        summary=notes or title,
+        source_id=source_uuid,
+        related_fact_ids=[row["id"]],
+        confidence=confidence,
+    )
+    return _sophie_response(row)
+
+
+async def sophie_patch_confirmed_action(
+    database: Database,
+    *,
+    item_id: UUID,
+    user_id: str,
+    title: str | None,
+    notes: str | None,
+    due_at: str | None,
+    remind_at: str | None,
+    timezone_name: str | None,
+    source_type: str,
+    provenance_summary: str | None,
+    source_ref: str | None,
+    idempotency_key: str | None,
+    status: str | None = None,
+    completed_at: str | None = None,
+) -> dict[str, Any]:
+    fact = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not fact or fact.get("fact_type") not in {"task", "reminder"}:
+        raise HTTPException(status_code=404, detail="Action not found.")
+    if idempotency_key:
+        created_from = fact.setdefault("created_from", {})
+        if created_from.get("last_mutation_idempotency_key") == idempotency_key:
+            return _sophie_response(fact)
+        created_from["last_mutation_idempotency_key"] = idempotency_key
+    content = fact["content"]
+    if title is not None:
+        content["title"] = title
+    if notes is not None:
+        content["summary"] = notes
+        content.setdefault("evidence", {})["raw_evidence"] = notes
+    content.setdefault("time", {})
+    if due_at is not None:
+        content["time"]["due_date"] = due_at
+    if remind_at is not None:
+        content["time"]["reminder_at"] = remind_at
+    if timezone_name is not None:
+        content["time"]["timezone"] = timezone_name
+    if provenance_summary is not None:
+        content.setdefault("metadata", {})["provenance_summary"] = provenance_summary
+    if source_ref is not None:
+        content.setdefault("metadata", {})["source_ref"] = source_ref
+    fact["content"] = content
+    fact["last_seen_at"] = _now_naive()
+    fact["last_confirmed_at"] = fact["last_seen_at"]
+    timeline_event = None
+    if fact["fact_type"] == "task" and (status == "completed" or completed_at):
+        fact["status"] = "historical"
+        fact["content"].setdefault("metadata", {})["item_status"] = "completed"
+        fact["content"] = apply_lifecycle_timestamp(
+            fact["content"],
+            completed_at=completed_at or fact["last_seen_at"].replace(tzinfo=timezone.utc).isoformat(),
+        )
+        timeline_event = "task_completed"
+    elif fact["fact_type"] == "reminder" and status == "dismissed":
+        fact["status"] = "dismissed"
+        fact["content"].setdefault("metadata", {})["item_status"] = "dismissed"
+        fact["content"] = apply_lifecycle_timestamp(
+            fact["content"],
+            cancelled_at=fact["last_seen_at"].replace(tzinfo=timezone.utc).isoformat(),
+        )
+        timeline_event = "reminder_dismissed"
+    else:
+        fact["status"] = "active"
+        fact["content"].setdefault("metadata", {})["item_status"] = "active"
+    fact["source_type"] = source_type
+    _refresh_operational_row(fact, item_type=fact["fact_type"], source_id=fact["source_ids"][0] if fact.get("source_ids") else None, source_ids=fact.get("source_ids"))
+    await _update_fact_record(database, fact)
+    if timeline_event:
+        await _insert_timeline_event(
+            database,
+            user_id=user_id,
+            event_type=timeline_event,
+            timeline_type="user_life",
+            title=fact["content"].get("title") or "Action updated",
+            summary=fact["content"].get("summary") or "",
+            source_id=fact["source_ids"][0] if fact.get("source_ids") else None,
+            related_fact_ids=[fact["id"]],
+            confidence=fact["confidence"],
+        )
+    return _sophie_response(fact)
+
+
+async def sophie_delete_confirmed_action(
+    database: Database,
+    *,
+    item_id: UUID,
+    user_id: str,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    fact = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not fact or fact.get("fact_type") not in {"task", "reminder"}:
+        raise HTTPException(status_code=404, detail="Action not found.")
+    created_from = fact.setdefault("created_from", {})
+    if idempotency_key and created_from.get("last_mutation_idempotency_key") == idempotency_key:
+        return _sophie_response(fact)
+    if idempotency_key:
+        created_from["last_mutation_idempotency_key"] = idempotency_key
+    fact["last_seen_at"] = _now_naive()
+    fact["last_confirmed_at"] = fact["last_seen_at"]
+    if fact["fact_type"] == "reminder":
+        fact["status"] = "dismissed"
+        fact["content"].setdefault("metadata", {})["item_status"] = "dismissed"
+        fact["content"] = apply_lifecycle_timestamp(
+            fact["content"],
+            cancelled_at=fact["last_seen_at"].replace(tzinfo=timezone.utc).isoformat(),
+        )
+        event_type = "reminder_dismissed"
+    else:
+        fact["status"] = "historical"
+        fact["content"].setdefault("metadata", {})["item_status"] = "archived"
+        event_type = "task_archived"
+    _refresh_operational_row(fact, item_type=fact["fact_type"], source_id=fact["source_ids"][0] if fact.get("source_ids") else None, source_ids=fact.get("source_ids"))
+    await _update_fact_record(database, fact)
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type=event_type,
+        timeline_type="user_life",
+        title=fact["content"].get("title") or "Action archived",
+        summary=fact["content"].get("summary") or "",
+        source_id=fact["source_ids"][0] if fact.get("source_ids") else None,
+        related_fact_ids=[fact["id"]],
+        confidence=fact["confidence"],
+    )
+    return _sophie_response(fact)
+
+
+async def sophie_create_confirmed_event(
+    database: Database,
+    *,
+    user_id: str,
+    title: str,
+    notes: str | None,
+    starts_at: str | None,
+    ends_at: str | None,
+    timezone_name: str | None,
+    location: str | None,
+    participants: list[str] | None,
+    source_type: str,
+    provenance_summary: str | None,
+    confidence: float,
+    source_ref: str | None,
+    idempotency_key: str,
+    original_text: str | None = None,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
+    existing = await _fetch_fact_by_idempotency_key(database, user_id=user_id, idempotency_key=idempotency_key)
+    if existing:
+        return _sophie_response(existing)
+    source_uuid = _uuid_from_ref(source_ref, fallback=idempotency_key)
+    content = _sophie_content(
+        fact_type="event",
+        title=title,
+        notes=notes,
+        due_at=None,
+        remind_at=None,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        timezone_name=timezone_name,
+        location=location,
+        participants=participants,
+        source_type=source_type,
+        provenance_summary=provenance_summary,
+        original_text=original_text,
+        source_ref=source_ref,
+    )
+    row = await _insert_confirmed_fact(
+        database,
+        user_id=user_id,
+        fact_type="event",
+        domain="events",
+        content=content,
+        confidence=confidence,
+        source_ids=[source_uuid],
+        status="active",
+        source_type=source_type,
+        who_said_it="user",
+        channel=source_type,
+        created_from={
+            "writer": "sophie_confirmed_action",
+            "mode": "confirmed_write",
+            "writer_kind": "event",
+            "tenant_id": tenant_id,
+            "source_ref": source_ref,
+            "idempotency_key": idempotency_key,
+            "provenance_summary": provenance_summary,
+        },
+    )
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type="event_created",
+        timeline_type="calendar",
+        title=title,
+        summary=notes or title,
+        source_id=source_uuid,
+        related_fact_ids=[row["id"]],
+        confidence=confidence,
+    )
+    return _sophie_response(row)
+
+
+async def sophie_patch_confirmed_event(
+    database: Database,
+    *,
+    item_id: UUID,
+    user_id: str,
+    title: str | None,
+    notes: str | None,
+    starts_at: str | None,
+    ends_at: str | None,
+    timezone_name: str | None,
+    location: str | None,
+    participants: list[str] | None,
+    source_type: str,
+    provenance_summary: str | None,
+    source_ref: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    fact = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not fact or fact.get("fact_type") != "event":
+        raise HTTPException(status_code=404, detail="Event not found.")
+    created_from = fact.setdefault("created_from", {})
+    if idempotency_key and created_from.get("last_mutation_idempotency_key") == idempotency_key:
+        return _sophie_response(fact)
+    if idempotency_key:
+        created_from["last_mutation_idempotency_key"] = idempotency_key
+    content = fact["content"]
+    if title is not None:
+        content["title"] = title
+    if notes is not None:
+        content["summary"] = notes
+        content.setdefault("evidence", {})["raw_evidence"] = notes
+    content.setdefault("time", {})
+    if starts_at is not None:
+        content["time"]["date"] = starts_at
+        content["time"]["starts_at"] = starts_at
+    if ends_at is not None:
+        content["time"]["ends_at"] = ends_at
+    if timezone_name is not None:
+        content["time"]["timezone"] = timezone_name
+    metadata = content.setdefault("metadata", {})
+    if location is not None:
+        metadata["location"] = location
+    if participants is not None:
+        metadata["participants"] = participants
+        content.setdefault("links", {})["people"] = participants
+    if provenance_summary is not None:
+        metadata["provenance_summary"] = provenance_summary
+    if source_ref is not None:
+        metadata["source_ref"] = source_ref
+    fact["content"] = content
+    fact["status"] = "active"
+    fact["last_seen_at"] = _now_naive()
+    fact["last_confirmed_at"] = fact["last_seen_at"]
+    fact["source_type"] = source_type
+    _refresh_operational_row(fact, item_type="event", source_id=fact["source_ids"][0] if fact.get("source_ids") else None, source_ids=fact.get("source_ids"))
+    await _update_fact_record(database, fact)
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type="event_updated",
+        timeline_type="calendar",
+        title=fact["content"].get("title") or "Event updated",
+        summary=fact["content"].get("summary") or "",
+        source_id=fact["source_ids"][0] if fact.get("source_ids") else None,
+        related_fact_ids=[fact["id"]],
+        confidence=fact["confidence"],
+    )
+    return _sophie_response(fact)
+
+
+async def sophie_cancel_confirmed_event(
+    database: Database,
+    *,
+    item_id: UUID,
+    user_id: str,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    fact = await _fetch_fact_by_id(database, user_id=user_id, item_id=item_id)
+    if not fact or fact.get("fact_type") != "event":
+        raise HTTPException(status_code=404, detail="Event not found.")
+    created_from = fact.setdefault("created_from", {})
+    if idempotency_key and created_from.get("last_mutation_idempotency_key") == idempotency_key:
+        return _sophie_response(fact)
+    if idempotency_key:
+        created_from["last_mutation_idempotency_key"] = idempotency_key
+    fact["status"] = "dismissed"
+    fact["last_seen_at"] = _now_naive()
+    fact["last_confirmed_at"] = fact["last_seen_at"]
+    fact["content"].setdefault("metadata", {})["item_status"] = "cancelled"
+    fact["content"] = apply_lifecycle_timestamp(
+        fact["content"],
+        cancelled_at=fact["last_seen_at"].replace(tzinfo=timezone.utc).isoformat(),
+    )
+    _refresh_operational_row(fact, item_type="event", source_id=fact["source_ids"][0] if fact.get("source_ids") else None, source_ids=fact.get("source_ids"))
+    await _update_fact_record(database, fact)
+    await _insert_timeline_event(
+        database,
+        user_id=user_id,
+        event_type="event_cancelled",
+        timeline_type="calendar",
+        title=fact["content"].get("title") or "Event cancelled",
+        summary=fact["content"].get("summary") or "",
+        source_id=fact["source_ids"][0] if fact.get("source_ids") else None,
+        related_fact_ids=[fact["id"]],
+        confidence=fact["confidence"],
+    )
+    return _sophie_response(fact)
 
 
 async def _confirm_candidate_as_fact(

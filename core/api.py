@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import Body, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from core.db import Database
@@ -19,6 +20,12 @@ from core.items import (
     pending_reminders,
     record_habit_completion,
     resolve_thread,
+    sophie_cancel_confirmed_event,
+    sophie_create_confirmed_action,
+    sophie_create_confirmed_event,
+    sophie_delete_confirmed_action,
+    sophie_patch_confirmed_action,
+    sophie_patch_confirmed_event,
     todays_schedule,
     update_action,
     update_event,
@@ -105,6 +112,25 @@ class MemoryControlRequest(BaseModel):
     target_id: str | None = None
     target_type: str
     note: str | None = None
+
+
+def _is_sophie_confirmed_payload(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in ("tenantId", "userId", "sourceType", "sourceRef", "idempotencyKey"))
+
+
+def _require_sophie_user_id(payload: dict[str, Any]) -> str:
+    user_id = payload.get("userId") or payload.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=422, detail="userId is required.")
+    return str(user_id)
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    return [str(item) for item in value]
 
 
 async def get_database() -> AsyncIterator[Database]:
@@ -228,39 +254,99 @@ async def get_actions(
 
 @app.post("/v3/actions")
 async def post_actions(
-    request: ItemCreateRequest,
+    request: dict[str, Any] = Body(...),
     database: Database = Depends(get_database),
 ):
+    if _is_sophie_confirmed_payload(request):
+        return await sophie_create_confirmed_action(
+            database,
+            user_id=_require_sophie_user_id(request),
+            kind=str(request.get("kind") or "todo"),
+            title=str(request.get("title") or ""),
+            notes=request.get("notes"),
+            due_at=request.get("dueAt"),
+            remind_at=request.get("remindAt"),
+            timezone_name=request.get("timezone"),
+            source_type=str(request.get("sourceType") or "sophie_confirmed"),
+            provenance_summary=request.get("provenanceSummary"),
+            confidence=float(request.get("confidence") or 1.0),
+            source_ref=request.get("sourceRef"),
+            idempotency_key=str(request.get("idempotencyKey") or f"action:{request.get('sourceRef') or request.get('title') or uuid4()}"),
+            original_text=request.get("originalText"),
+            participants=_string_list(request.get("participants")),
+            location=request.get("location"),
+            tenant_id=request.get("tenantId"),
+        )
+    typed = ItemCreateRequest.model_validate(request)
     return await create_action(
         database,
-        user_id=request.user_id,
-        title=request.title,
-        summary=request.summary,
-        due_at=request.due_at,
-        priority=request.priority,
-        links=request.links,
-        source=request.source,
-        requires_confirmation=request.requires_confirmation,
+        user_id=typed.user_id,
+        title=typed.title,
+        summary=typed.summary,
+        due_at=typed.due_at,
+        priority=typed.priority,
+        links=typed.links,
+        source=typed.source,
+        requires_confirmation=typed.requires_confirmation,
     )
 
 
 @app.patch("/v3/actions/{item_id}")
 async def patch_action(
     item_id: str,
-    request: ActionPatchRequest,
+    request: dict[str, Any] = Body(...),
     database: Database = Depends(get_database),
 ):
     from uuid import UUID
 
+    if _is_sophie_confirmed_payload(request):
+        return await sophie_patch_confirmed_action(
+            database,
+            item_id=UUID(item_id),
+            user_id=_require_sophie_user_id(request),
+            title=request.get("title"),
+            notes=request.get("notes"),
+            due_at=request.get("dueAt"),
+            remind_at=request.get("remindAt"),
+            timezone_name=request.get("timezone"),
+            source_type=str(request.get("sourceType") or "sophie_confirmed"),
+            provenance_summary=request.get("provenanceSummary"),
+            source_ref=request.get("sourceRef"),
+            idempotency_key=request.get("idempotencyKey"),
+            status=request.get("status"),
+            completed_at=request.get("completedAt"),
+        )
+    typed = ActionPatchRequest.model_validate(request)
     return await update_action(
         database,
         item_id=UUID(item_id),
-        user_id=request.user_id,
-        status=request.status,
-        title=request.title,
-        summary=request.summary,
-        due_at=request.due_at,
-        priority=request.priority,
+        user_id=typed.user_id,
+        status=typed.status,
+        title=typed.title,
+        summary=typed.summary,
+        due_at=typed.due_at,
+        priority=typed.priority,
+    )
+
+
+@app.delete("/v3/actions/{item_id}")
+async def delete_action(
+    item_id: str,
+    request: dict[str, Any] | None = Body(default=None),
+    user_id: str | None = None,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    payload = request or {}
+    effective_user_id = payload.get("userId") or payload.get("user_id") or user_id
+    if not effective_user_id:
+        raise HTTPException(status_code=422, detail="userId is required.")
+    return await sophie_delete_confirmed_action(
+        database,
+        item_id=UUID(item_id),
+        user_id=str(effective_user_id),
+        idempotency_key=payload.get("idempotencyKey"),
     )
 
 
@@ -276,38 +362,92 @@ async def get_events(
 
 @app.post("/v3/events")
 async def post_events(
-    request: ItemCreateRequest,
+    request: dict[str, Any] = Body(...),
     database: Database = Depends(get_database),
 ):
+    if _is_sophie_confirmed_payload(request):
+        return await sophie_create_confirmed_event(
+            database,
+            user_id=_require_sophie_user_id(request),
+            title=str(request.get("title") or ""),
+            notes=request.get("notes"),
+            starts_at=request.get("startsAt"),
+            ends_at=request.get("endsAt"),
+            timezone_name=request.get("timezone"),
+            location=request.get("location"),
+            participants=_string_list(request.get("participants")),
+            source_type=str(request.get("sourceType") or "sophie_confirmed"),
+            provenance_summary=request.get("provenanceSummary"),
+            confidence=float(request.get("confidence") or 1.0),
+            source_ref=request.get("sourceRef"),
+            idempotency_key=str(request.get("idempotencyKey") or f"event:{request.get('sourceRef') or request.get('title') or uuid4()}"),
+            original_text=request.get("originalText"),
+            tenant_id=request.get("tenantId"),
+        )
+    typed = ItemCreateRequest.model_validate(request)
     return await create_event(
         database,
-        user_id=request.user_id,
-        title=request.title,
-        summary=request.summary,
-        due_at=request.due_at,
-        priority=request.priority,
-        links=request.links,
-        source=request.source,
+        user_id=typed.user_id,
+        title=typed.title,
+        summary=typed.summary,
+        due_at=typed.due_at,
+        priority=typed.priority,
+        links=typed.links,
+        source=typed.source,
     )
 
 
 @app.patch("/v3/events/{item_id}")
 async def patch_event(
     item_id: str,
-    request: EventPatchRequest,
+    request: dict[str, Any] = Body(...),
     database: Database = Depends(get_database),
 ):
     from uuid import UUID
 
+    if _is_sophie_confirmed_payload(request):
+        return await sophie_patch_confirmed_event(
+            database,
+            item_id=UUID(item_id),
+            user_id=_require_sophie_user_id(request),
+            title=request.get("title"),
+            notes=request.get("notes"),
+            starts_at=request.get("startsAt"),
+            ends_at=request.get("endsAt"),
+            timezone_name=request.get("timezone"),
+            location=request.get("location"),
+            participants=_string_list(request.get("participants")),
+            source_type=str(request.get("sourceType") or "sophie_confirmed"),
+            provenance_summary=request.get("provenanceSummary"),
+            source_ref=request.get("sourceRef"),
+            idempotency_key=request.get("idempotencyKey"),
+        )
+    typed = EventPatchRequest.model_validate(request)
     return await update_event(
         database,
         item_id=UUID(item_id),
-        user_id=request.user_id,
-        status=request.status,
-        title=request.title,
-        summary=request.summary,
-        due_at=request.due_at,
-        priority=request.priority,
+        user_id=typed.user_id,
+        status=typed.status,
+        title=typed.title,
+        summary=typed.summary,
+        due_at=typed.due_at,
+        priority=typed.priority,
+    )
+
+
+@app.post("/v3/events/{item_id}/cancel")
+async def cancel_event(
+    item_id: str,
+    request: dict[str, Any] = Body(...),
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await sophie_cancel_confirmed_event(
+        database,
+        item_id=UUID(item_id),
+        user_id=_require_sophie_user_id(request),
+        idempotency_key=request.get("idempotencyKey"),
     )
 
 
