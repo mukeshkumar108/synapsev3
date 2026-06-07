@@ -206,6 +206,47 @@ def test_task_manual_crud_and_idempotency() -> None:
     ]
 
 
+def test_task_completion_keeps_manual_status_and_columns_in_sync() -> None:
+    db = FakeDatabase()
+    app.dependency_overrides[get_database] = _override_database(db)
+    client = TestClient(app)
+
+    create = client.post(
+        "/v3/tasks",
+        json={
+            "tenantId": "tenant-1",
+            "userId": "user-1",
+            "title": "Ship spec",
+            "notes": "Finalize and send",
+            "dueAt": "2026-06-10T20:00:00+01:00",
+            "timezone": "Europe/London",
+            "priority": "high",
+            "createdFrom": "tasks_tab",
+            "idempotencyKey": "task-sync-create-1",
+        },
+    )
+    task_id = create.json()["id"]
+    complete = client.post(
+        f"/v3/tasks/{task_id}/complete",
+        json={
+            "userId": "user-1",
+            "createdFrom": "tasks_tab",
+            "idempotencyKey": "task-sync-complete-1",
+            "completedAt": "2026-06-10T21:15:00+01:00",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert complete.status_code == 200
+    fact = next(iter(db.confirmed_facts.values()))
+    assert fact["status"] == "historical"
+    assert fact["content"]["metadata"]["item_status"] == "completed"
+    assert fact["completed_at"] is not None
+    assert fact["due_at"] is not None
+    assert fact["priority"] == "high"
+    assert fact["created_from"]["last_mutation_idempotency_key"] == "task-sync-complete-1"
+
+
 def test_reminder_manual_crud() -> None:
     db = FakeDatabase()
     app.dependency_overrides[get_database] = _override_database(db)
@@ -268,6 +309,46 @@ def test_reminder_manual_crud() -> None:
         "reminder_archived",
         "reminder_archived",
     ]
+
+
+def test_reminder_dismissal_keeps_manual_status_and_columns_in_sync() -> None:
+    db = FakeDatabase()
+    app.dependency_overrides[get_database] = _override_database(db)
+    client = TestClient(app)
+
+    create = client.post(
+        "/v3/reminders",
+        json={
+            "tenantId": "tenant-1",
+            "userId": "user-1",
+            "title": "Pay rent",
+            "notes": "Morning reminder",
+            "remindAt": "2026-06-08T09:00:00+01:00",
+            "timezone": "Europe/London",
+            "priority": "medium",
+            "createdFrom": "reminders_tab",
+            "idempotencyKey": "reminder-sync-create-1",
+        },
+    )
+    reminder_id = create.json()["id"]
+    dismiss = client.post(
+        f"/v3/reminders/{reminder_id}/dismiss",
+        json={
+            "userId": "user-1",
+            "createdFrom": "reminders_tab",
+            "idempotencyKey": "reminder-sync-dismiss-1",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert dismiss.status_code == 200
+    fact = next(iter(db.confirmed_facts.values()))
+    assert fact["status"] == "dismissed"
+    assert fact["content"]["metadata"]["item_status"] == "dismissed"
+    assert fact["cancelled_at"] is not None
+    assert fact["remind_at"] is not None
+    assert fact["priority"] == "medium"
+    assert fact["created_from"]["last_mutation_idempotency_key"] == "reminder-sync-dismiss-1"
 
 
 def test_event_detail_delete_and_habit_manual_crud() -> None:
@@ -349,3 +430,42 @@ def test_event_detail_delete_and_habit_manual_crud() -> None:
     assert "habit_updated" in event_types
     assert "habit_completed" in event_types
     assert "habit_archived" in event_types
+
+
+def test_habit_completion_keeps_cadence_and_completion_columns_in_sync() -> None:
+    db = FakeDatabase()
+    app.dependency_overrides[get_database] = _override_database(db)
+    client = TestClient(app)
+
+    create = client.post(
+        "/v3/habits",
+        json={
+            "tenantId": "tenant-1",
+            "userId": "user-1",
+            "title": "Journal",
+            "notes": "Write nightly",
+            "timezone": "Europe/London",
+            "cadence": "daily",
+            "priority": "low",
+            "createdFrom": "habits_tab",
+            "idempotencyKey": "habit-sync-create-1",
+        },
+    )
+    habit_id = create.json()["id"]
+    complete = client.patch(
+        f"/v3/habits/{habit_id}/complete",
+        json={
+            "userId": "user-1",
+            "completedAt": "2026-06-06T22:00:00+01:00",
+            "createdFrom": "habits_tab",
+            "idempotencyKey": "habit-sync-complete-1",
+        },
+    )
+    app.dependency_overrides.clear()
+
+    assert complete.status_code == 200
+    fact = next(iter(db.confirmed_facts.values()))
+    assert fact["completed_at"] is not None
+    assert fact["recurrence_rule"] == "daily"
+    assert fact["content"]["time"]["recurrence_rule"] == "daily"
+    assert fact["created_from"]["last_mutation_idempotency_key"] == "habit-sync-complete-1"

@@ -191,6 +191,33 @@ def test_snoozed_thread_hides_until_expiry() -> None:
     assert db.timeline_events[-1]["event_type"] == "thread_snoozed"
 
 
+def test_thread_snooze_mutation_is_idempotent_and_updates_operational_columns() -> None:
+    db = FakeDatabase()
+    thread_id = _seed_thread(db)
+    app.dependency_overrides[get_database] = _override_database(db)
+    client = TestClient(app)
+    payload = {
+        "userId": "user-1",
+        "createdFrom": "thread_surfacing",
+        "idempotencyKey": "thread-snooze-sync-1",
+        "snoozedUntil": "2099-06-07T10:00:00+00:00",
+    }
+
+    first = client.post(f"/v3/threads/{thread_id}/snooze", json=payload)
+    second = client.post(f"/v3/threads/{thread_id}/snooze", json=payload)
+    app.dependency_overrides.clear()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    thread = db.confirmed_facts[thread_id]
+    assert thread["snoozed_until"] is not None
+    assert thread["last_resurfaced_at"] is not None
+    assert thread["follow_up_needed"] is True
+    assert thread["content"]["metadata"]["open_loop_status"] == "active"
+    assert len(db.timeline_events) == 1
+    assert db.timeline_events[0]["event_type"] == "thread_snoozed"
+
+
 def test_convert_thread_to_task_creates_linked_task() -> None:
     db = FakeDatabase()
     thread_id = _seed_thread(db)
@@ -220,6 +247,8 @@ def test_convert_thread_to_task_creates_linked_task() -> None:
     linked_fact = db.confirmed_facts[link["to_fact_id"]]
     assert linked_fact["fact_type"] == "task"
     assert [event["event_type"] for event in db.timeline_events] == ["task_created", "thread_progressed"]
+    assert db.confirmed_facts[thread_id]["next_move"] == "wait"
+    assert db.confirmed_facts[thread_id]["last_progressed_at"] is not None
 
 
 def test_convert_thread_to_reminder_and_explanation_surfaces_links_and_reasons() -> None:
