@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: synapse_v3_postgres
+    environment:
+      POSTGRES_DB: synapse_v3
+      POSTGRES_USER: synapse_v3
+      POSTGRES_PASSWORD: synapse_v3
+    ports:
+      - "5436:5432"
+    volumes:
+      - synapse_v3_pgdata:/var/lib/postgresql/data
+
+volumes:
+  synapse_v3_pgdata:
