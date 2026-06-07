@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from agents import reconciliation_agent
 from core.db import Database
 from core import embeddings
+from core import entity_service
 from core.operational import apply_lifecycle_timestamp, extract_operational_fields, normalize_provenance, parse_datetime, parse_datetime as _parse_datetime
 
 
@@ -762,6 +763,7 @@ async def _create_confirmed_fact(
         "interaction_mode": candidate.get("interaction_mode"),
     }
     await embeddings.index_confirmed_fact(database, fact_row)
+    await entity_service.sync_confirmed_fact_entities(database, fact_row)
     await _insert_timeline_event(
         database,
         candidate=candidate,
@@ -876,6 +878,38 @@ async def _merge_or_update_confirmed_fact(
         operational["follow_up_needed"],
     )
     await embeddings.index_confirmed_fact(
+        database,
+        {
+            **existing_fact,
+            "content": content,
+            "structured_content": operational["structured_content"],
+            "confidence": new_confidence,
+            "last_seen_at": now_naive,
+            "last_confirmed_at": now_naive,
+            "source_ids": existing_sources,
+            "expires_at": expires_at.replace(tzinfo=None) if expires_at else None,
+            "claim_type": claim_type,
+            "source_type": operational["source_type"],
+            "primary_source_id": UUID(operational["source_id"]) if operational.get("source_id") else None,
+            "who_said_it": operational["who_said_it"],
+            "original_text": operational["original_text"],
+            "channel": operational["channel"],
+            "conversation_id": operational["conversation_id"],
+            "created_from": operational["created_from"],
+            "provenance": operational["provenance"],
+            "starts_at": parse_datetime(operational["starts_at"]).replace(tzinfo=None) if parse_datetime(operational["starts_at"]) else None,
+            "ends_at": parse_datetime(operational["ends_at"]).replace(tzinfo=None) if parse_datetime(operational["ends_at"]) else None,
+            "due_at": parse_datetime(operational["due_at"]).replace(tzinfo=None) if parse_datetime(operational["due_at"]) else None,
+            "remind_at": parse_datetime(operational["remind_at"]).replace(tzinfo=None) if parse_datetime(operational["remind_at"]) else None,
+            "timezone": operational["timezone"],
+            "recurrence_rule": operational["recurrence_rule"],
+            "completed_at": parse_datetime(operational["completed_at"]).replace(tzinfo=None) if parse_datetime(operational["completed_at"]) else None,
+            "cancelled_at": parse_datetime(operational["cancelled_at"]).replace(tzinfo=None) if parse_datetime(operational["cancelled_at"]) else None,
+            "priority": operational["priority"],
+            "follow_up_needed": operational["follow_up_needed"],
+        },
+    )
+    await entity_service.sync_confirmed_fact_entities(
         database,
         {
             **existing_fact,

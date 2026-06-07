@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from agent_contract import AgentOutput
 from core.db import Database
+from core import entity_service
 from core.operational import extract_operational_fields, normalize_provenance, parse_datetime
 
 
@@ -289,6 +290,7 @@ async def persist_candidate_records(
             record.get("claim_status", "pending"),
             record.get("interaction_mode", "real_life"),
         )
+        await entity_service.sync_candidate_entities(database, record)
 
 
 async def fetch_candidates_for_source(
