@@ -1,62 +1,16 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
-from core.db import Database
 from core import embeddings
-from core.retrieval_v2 import recall_v2
+from core.db import Database
+from core.retrieval_query import normalized_tokens
 
 
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "about",
-    "did",
-    "do",
-    "for",
-    "i",
-    "is",
-    "me",
-    "my",
-    "of",
-    "say",
-    "tell",
-    "the",
-    "to",
-    "we",
-    "what",
-    "with",
-    "you",
-    "your",
-}
-
-EXACT_PATTERNS = (
-    "who is",
-    "what is",
-    "when is",
-    "where is",
-    "who's",
-    "what's",
-    "when's",
-    "where's",
-)
-EPISODIC_MARKERS = (
-    "remember when",
-    "we talked",
-    "we discussed",
-    "that conversation",
-    "conversation about",
-    "talked about",
-    "discussed",
-)
-
-
-def _serialize(value: Any) -> str:
+def serialize(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -64,33 +18,17 @@ def _serialize(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str).lower()
 
 
-def _normalize_text(value: str) -> str:
-    lowered = value.lower()
-    lowered = re.sub(r"\b([a-z0-9_]+)'s\b", r"\1", lowered)
-    lowered = re.sub(r"\b([a-z0-9_]+)s'\b", r"\1", lowered)
-    return lowered
-
-
-def _normalized_tokens(value: str) -> list[str]:
-    tokens = re.findall(r"[a-z0-9_]+", _normalize_text(value))
-    return [token for token in tokens if token and token not in STOPWORDS]
-
-
-def _contains_token_phrase(document_tokens: list[str], query_tokens: list[str]) -> bool:
+def contains_token_phrase(document_tokens: list[str], query_tokens: list[str]) -> bool:
     if not query_tokens:
         return False
     width = len(query_tokens)
     return any(document_tokens[index : index + width] == query_tokens for index in range(len(document_tokens) - width + 1))
 
 
-def _best_fuzzy_ratio(query_token: str, document_tokens: set[str]) -> float:
+def best_fuzzy_ratio(query_token: str, document_tokens: set[str]) -> float:
     if len(query_token) < 4:
         return 0.0
-    candidates = [
-        token
-        for token in document_tokens
-        if len(token) >= 4 and token[0] == query_token[0] and abs(len(token) - len(query_token)) <= 2
-    ]
+    candidates = [token for token in document_tokens if len(token) >= 4 and token[0] == query_token[0] and abs(len(token) - len(query_token)) <= 2]
     best_ratio = 0.0
     for token in candidates:
         ratio = SequenceMatcher(None, query_token, token).ratio()
@@ -105,27 +43,24 @@ def _best_fuzzy_ratio(query_token: str, document_tokens: set[str]) -> float:
     return best_ratio
 
 
-def _score_match(text: str, query: str) -> dict[str, Any]:
-    doc_token_list = _normalized_tokens(text)
+def score_match(text: str, query: str) -> dict[str, Any]:
+    doc_token_list = normalized_tokens(text)
     doc_tokens = set(doc_token_list)
-    query_tokens = _normalized_tokens(query)
-
-    exact_phrase = _contains_token_phrase(doc_token_list, query_tokens)
+    query_tokens = normalized_tokens(query)
+    exact_phrase = contains_token_phrase(doc_token_list, query_tokens)
     exact_overlap = sum(1 for token in query_tokens if token in doc_tokens)
     strong_fuzzy = 0
     weak_fuzzy = 0
     best_fuzzy = 0.0
-
     for token in query_tokens:
         if token in doc_tokens or len(token) < 4:
             continue
-        ratio = _best_fuzzy_ratio(token, doc_tokens)
+        ratio = best_fuzzy_ratio(token, doc_tokens)
         best_fuzzy = max(best_fuzzy, ratio)
         if ratio >= 0.9:
             strong_fuzzy += 1
         elif ratio >= 0.84:
             weak_fuzzy += 1
-
     raw_score = 0
     if exact_phrase:
         raw_score += 10
@@ -133,7 +68,6 @@ def _score_match(text: str, query: str) -> dict[str, Any]:
     raw_score += strong_fuzzy * 3
     raw_score += weak_fuzzy
     normalized_score = min(1.0, raw_score / 14.0) if raw_score else 0.0
-
     return {
         "score": normalized_score,
         "raw_score": raw_score,
@@ -145,7 +79,7 @@ def _score_match(text: str, query: str) -> dict[str, Any]:
     }
 
 
-def _recency_score(value: Any) -> float:
+def recency_score(value: Any) -> float:
     if isinstance(value, datetime):
         occurred = value
     else:
@@ -167,7 +101,7 @@ def _recency_score(value: Any) -> float:
     return 0.35
 
 
-def _coerce_datetime(value: Any) -> datetime | None:
+def coerce_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     normalized = str(value or "").replace("Z", "+00:00")
@@ -180,18 +114,18 @@ def _coerce_datetime(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _truncate(text: str, *, limit: int = 180) -> str:
+def truncate(text: str, *, limit: int = 180) -> str:
     cleaned = " ".join(text.split())
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
 
 
-def _excerpt(text: str, query: str, *, width: int = 160) -> str:
+def excerpt(text: str, query: str, *, width: int = 160) -> str:
     cleaned = " ".join(text.split())
     if len(cleaned) <= width:
         return cleaned
-    query_tokens = _normalized_tokens(query)
+    query_tokens = normalized_tokens(query)
     lowered = cleaned.lower()
     match_index = -1
     for token in query_tokens:
@@ -200,7 +134,7 @@ def _excerpt(text: str, query: str, *, width: int = 160) -> str:
             match_index = idx
             break
     if match_index < 0:
-        return _truncate(cleaned, limit=width)
+        return truncate(cleaned, limit=width)
     start = max(0, match_index - width // 3)
     end = min(len(cleaned), start + width)
     snippet = cleaned[start:end]
@@ -209,57 +143,6 @@ def _excerpt(text: str, query: str, *, width: int = 160) -> str:
     if end < len(cleaned):
         snippet = snippet + "..."
     return snippet
-
-
-def _infer_recall_type(query: str) -> str:
-    lowered = _normalize_text(query)
-    if any(lowered.startswith(pattern) for pattern in EXACT_PATTERNS):
-        return "exact"
-    if any(marker in lowered for marker in EPISODIC_MARKERS) or ("remember" in lowered and "conversation" in lowered):
-        return "episodic"
-    return "hybrid"
-
-
-def _fact_search_text(fact: dict[str, Any]) -> str:
-    content = fact.get("content") or {}
-    metadata = content.get("metadata") or {}
-    agent_item = metadata.get("agent_item") or {}
-    links = content.get("links") or {}
-    parts = [
-        content.get("title"),
-        content.get("summary"),
-        _serialize(content),
-        _serialize(agent_item),
-        _serialize(links.get("people", [])),
-        _serialize(links.get("projects", [])),
-        _serialize(links.get("topics", [])),
-    ]
-    return " ".join(part for part in parts if part)
-
-
-def _summary_search_text(summary: dict[str, Any]) -> str:
-    return " ".join(
-        part
-        for part in [
-            summary.get("summary"),
-            _serialize(summary.get("tags", [])),
-            _serialize(summary.get("open_items", [])),
-            _serialize(summary.get("key_decisions", [])),
-        ]
-        if part
-    )
-
-
-def _timeline_search_text(event: dict[str, Any]) -> str:
-    return " ".join(
-        part
-        for part in [
-            event.get("title"),
-            event.get("summary"),
-            _serialize(event.get("event_type")),
-        ]
-        if part
-    )
 
 
 async def fetch_active_confirmed_facts(database: Database, *, user_id: str) -> list[dict[str, Any]]:
@@ -322,7 +205,7 @@ async def fetch_outbox_rows(database: Database, *, user_id: str) -> list[dict[st
     )
 
 
-def _source_refs_for_fact(fact: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
+def source_refs_for_fact(fact: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
     refs: list[str] = []
     source_ids = {str(item) for item in (fact.get("source_ids") or [])}
     outbox_by_id = {str(row["id"]): row for row in outbox_rows}
@@ -334,7 +217,7 @@ def _source_refs_for_fact(fact: dict[str, Any], outbox_rows: list[dict[str, Any]
     return list(dict.fromkeys(refs))
 
 
-def _source_refs_for_summary(summary: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
+def source_refs_for_summary(summary: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
     refs: list[str] = []
     source_id = summary.get("source_id")
     if source_id:
@@ -346,17 +229,13 @@ def _source_refs_for_summary(summary: dict[str, Any], outbox_rows: list[dict[str
     return refs
 
 
-def _source_refs_for_archive(row: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
+def source_refs_for_archive(row: dict[str, Any], outbox_rows: list[dict[str, Any]]) -> list[str]:
     refs = [f"source_archive:{row['id']}"]
-    refs.extend(
-        f"outbox:{outbox['id']}"
-        for outbox in outbox_rows
-        if str(outbox.get("source_archive_id")) == str(row["id"])
-    )
+    refs.extend(f"outbox:{outbox['id']}" for outbox in outbox_rows if str(outbox.get("source_archive_id")) == str(row["id"]))
     return refs
 
 
-def _source_refs_for_timeline(event: dict[str, Any]) -> list[str]:
+def source_refs_for_timeline(event: dict[str, Any]) -> list[str]:
     refs: list[str] = []
     if event.get("source_id"):
         refs.append(f"outbox:{event['source_id']}")
@@ -365,7 +244,7 @@ def _source_refs_for_timeline(event: dict[str, Any]) -> list[str]:
     return refs
 
 
-def _linked_entities(content: dict[str, Any]) -> dict[str, list[str]]:
+def linked_entities(content: dict[str, Any]) -> dict[str, list[str]]:
     links = content.get("links") or {}
     return {
         "people": [str(item).strip() for item in links.get("people", []) if str(item).strip()],
@@ -374,14 +253,14 @@ def _linked_entities(content: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
-def _open_loop_status(fact: dict[str, Any]) -> str | None:
+def open_loop_status(fact: dict[str, Any]) -> str | None:
     if fact.get("fact_type") != "thread":
         return None
     if fact.get("status") != "active":
         return str(fact.get("status"))
     snoozed_until = fact.get("snoozed_until")
     if snoozed_until:
-        parsed = _coerce_datetime(snoozed_until)
+        parsed = coerce_datetime(snoozed_until)
         if parsed and parsed > datetime.now(timezone.utc):
             return "snoozed"
     content = fact.get("content") or {}
@@ -397,13 +276,13 @@ def _open_loop_status(fact: dict[str, Any]) -> str | None:
     return "active"
 
 
-def _hybrid_score(*, lexical: float, vector: float, recency: float, confidence: float, weights: tuple[float, float, float, float]) -> float:
+def hybrid_score(*, lexical: float, vector: float, recency: float, confidence: float, weights: tuple[float, float, float, float]) -> float:
     lexical_weight, vector_weight, recency_weight, confidence_weight = weights
     score = lexical * lexical_weight + vector * vector_weight + recency * recency_weight + confidence * confidence_weight
     return round(min(1.0, score), 4)
 
 
-def _vector_hits_by_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def vector_hits_by_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     hits: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         key = (row["source_type"], str(row["source_id"]))
@@ -413,23 +292,28 @@ def _vector_hits_by_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dic
     return hits
 
 
-def _build_fact_item(
-    fact: dict[str, Any],
-    *,
-    lexical_meta: dict[str, Any],
-    vector_score: float,
-    outbox_rows: list[dict[str, Any]],
-) -> dict[str, Any]:
+def fact_search_text(fact: dict[str, Any]) -> str:
+    content = fact.get("content") or {}
+    metadata = content.get("metadata") or {}
+    agent_item = metadata.get("agent_item") or {}
+    links = content.get("links") or {}
+    parts = [content.get("title"), content.get("summary"), serialize(content), serialize(agent_item), serialize(links.get("people", [])), serialize(links.get("projects", [])), serialize(links.get("topics", []))]
+    return " ".join(part for part in parts if part)
+
+
+def summary_search_text(summary: dict[str, Any]) -> str:
+    return " ".join(part for part in [summary.get("summary"), serialize(summary.get("tags", [])), serialize(summary.get("open_items", [])), serialize(summary.get("key_decisions", []))] if part)
+
+
+def timeline_search_text(event: dict[str, Any]) -> str:
+    return " ".join(part for part in [event.get("title"), event.get("summary"), serialize(event.get("event_type"))] if part)
+
+
+def build_fact_item(fact: dict[str, Any], *, lexical_meta: dict[str, Any], vector_score: float, outbox_rows: list[dict[str, Any]]) -> dict[str, Any]:
     content = fact.get("content") or {}
     confidence = float(fact.get("confidence", 0.0))
-    recency = _recency_score(fact.get("last_seen_at") or fact.get("first_seen_at"))
-    score = _hybrid_score(
-        lexical=lexical_meta["score"],
-        vector=vector_score,
-        recency=recency,
-        confidence=confidence,
-        weights=(0.45, 0.35, 0.10, 0.10),
-    )
+    recency = recency_score(fact.get("last_seen_at") or fact.get("first_seen_at"))
+    score = hybrid_score(lexical=lexical_meta["score"], vector=vector_score, recency=recency, confidence=confidence, weights=(0.45, 0.35, 0.10, 0.10))
     return {
         "type": "fact",
         "id": str(fact["id"]),
@@ -437,43 +321,31 @@ def _build_fact_item(
         "summary": content.get("summary") or content.get("evidence", {}).get("raw_evidence"),
         "confidence": confidence,
         "score": score,
-        "source_refs": _source_refs_for_fact(fact, outbox_rows),
-        "evidence_preview": _truncate(content.get("evidence", {}).get("raw_evidence") or content.get("summary") or ""),
+        "source_refs": source_refs_for_fact(fact, outbox_rows),
+        "evidence_preview": truncate(content.get("evidence", {}).get("raw_evidence") or content.get("summary") or ""),
         "occurred_at": str(fact.get("last_seen_at") or fact.get("first_seen_at") or ""),
         "metadata": {
             "lane": "factual",
             "fact_type": fact.get("fact_type"),
             "domain": fact.get("domain"),
-            "linked_people": _linked_entities(content)["people"],
-            "linked_projects": _linked_entities(content)["projects"],
-            "linked_topics": _linked_entities(content)["topics"],
+            "linked_people": linked_entities(content)["people"],
+            "linked_projects": linked_entities(content)["projects"],
+            "linked_topics": linked_entities(content)["topics"],
             "lexical_score": round(lexical_meta["score"], 4),
             "vector_score": round(vector_score, 4),
             "recency_score": round(recency, 4),
         },
+        "evidence": {"match_reasons": [], "lane_hits": ["fact"]},
     }
 
 
-def _build_summary_episode(
-    summary: dict[str, Any],
-    *,
-    lexical_meta: dict[str, Any],
-    vector_hit: dict[str, Any] | None,
-    outbox_rows: list[dict[str, Any]],
-    query: str,
-) -> dict[str, Any]:
+def build_summary_episode(summary: dict[str, Any], *, lexical_meta: dict[str, Any], vector_hit: dict[str, Any] | None, outbox_rows: list[dict[str, Any]], query: str) -> dict[str, Any]:
     vector_text = str((vector_hit or {}).get("text") or summary.get("summary") or "")
     vector_score = float((vector_hit or {}).get("vector_score", 0.0))
-    lexical_from_vector = _score_match(vector_text, query)
+    lexical_from_vector = score_match(vector_text, query)
     lexical_score = max(lexical_meta["score"], lexical_from_vector["score"])
-    recency = _recency_score(summary.get("occurred_at"))
-    score = _hybrid_score(
-        lexical=lexical_score,
-        vector=vector_score,
-        recency=recency,
-        confidence=0.75,
-        weights=(0.30, 0.50, 0.20, 0.0),
-    )
+    recency = recency_score(summary.get("occurred_at"))
+    score = hybrid_score(lexical=lexical_score, vector=vector_score, recency=recency, confidence=0.75, weights=(0.30, 0.50, 0.20, 0.0))
     return {
         "type": "episode",
         "id": str(summary["id"]),
@@ -481,8 +353,8 @@ def _build_summary_episode(
         "summary": summary.get("summary"),
         "confidence": 0.75,
         "score": score,
-        "source_refs": _source_refs_for_summary(summary, outbox_rows),
-        "evidence_preview": _excerpt(vector_text or str(summary.get("summary") or ""), query, width=160),
+        "source_refs": source_refs_for_summary(summary, outbox_rows),
+        "evidence_preview": excerpt(vector_text or str(summary.get("summary") or ""), query, width=160),
         "occurred_at": str(summary.get("occurred_at") or ""),
         "metadata": {
             "lane": "episodic",
@@ -491,40 +363,31 @@ def _build_summary_episode(
             "lexical_score": round(lexical_score, 4),
             "vector_score": round(vector_score, 4),
             "recency_score": round(recency, 4),
+            "linked_people": [],
+            "linked_projects": [],
+            "linked_topics": [],
         },
+        "evidence": {"match_reasons": [], "lane_hits": ["source"]},
     }
 
 
-def _build_archive_episode(
-    row: dict[str, Any],
-    *,
-    lexical_meta: dict[str, Any],
-    vector_hit: dict[str, Any] | None,
-    outbox_rows: list[dict[str, Any]],
-    query: str,
-) -> dict[str, Any]:
+def build_archive_episode(row: dict[str, Any], *, lexical_meta: dict[str, Any], vector_hit: dict[str, Any] | None, outbox_rows: list[dict[str, Any]], query: str) -> dict[str, Any]:
     raw_content = embeddings.build_source_archive_search_text(row)
     vector_text = str((vector_hit or {}).get("text") or raw_content)
     vector_score = float((vector_hit or {}).get("vector_score", 0.0))
-    lexical_from_vector = _score_match(vector_text, query)
+    lexical_from_vector = score_match(vector_text, query)
     lexical_score = max(lexical_meta["score"], lexical_from_vector["score"])
-    recency = _recency_score(row.get("occurred_at") or row.get("captured_at"))
-    score = _hybrid_score(
-        lexical=lexical_score,
-        vector=vector_score,
-        recency=recency,
-        confidence=0.7,
-        weights=(0.25, 0.55, 0.20, 0.0),
-    )
+    recency = recency_score(row.get("occurred_at") or row.get("captured_at"))
+    score = hybrid_score(lexical=lexical_score, vector=vector_score, recency=recency, confidence=0.7, weights=(0.25, 0.55, 0.20, 0.0))
     return {
         "type": "episode",
         "id": str(row["id"]),
         "title": row.get("session_id") or row.get("source_external_id") or row.get("source_type"),
-        "summary": _truncate(vector_text, limit=120),
+        "summary": truncate(vector_text, limit=120),
         "confidence": 0.7,
         "score": score,
-        "source_refs": _source_refs_for_archive(row, outbox_rows),
-        "evidence_preview": _excerpt(vector_text, query, width=160),
+        "source_refs": source_refs_for_archive(row, outbox_rows),
+        "evidence_preview": excerpt(vector_text, query, width=160),
         "occurred_at": str(row.get("occurred_at") or row.get("captured_at") or ""),
         "metadata": {
             "lane": "episodic",
@@ -535,27 +398,19 @@ def _build_archive_episode(
             "lexical_score": round(lexical_score, 4),
             "vector_score": round(vector_score, 4),
             "recency_score": round(recency, 4),
+            "linked_people": [],
+            "linked_projects": [],
+            "linked_topics": [],
         },
+        "evidence": {"match_reasons": [], "lane_hits": ["source"]},
     }
 
 
-def _build_continuity_item(
-    fact: dict[str, Any],
-    *,
-    lexical_meta: dict[str, Any],
-    vector_score: float,
-    outbox_rows: list[dict[str, Any]],
-) -> dict[str, Any]:
+def build_continuity_item(fact: dict[str, Any], *, lexical_meta: dict[str, Any], vector_score: float, outbox_rows: list[dict[str, Any]]) -> dict[str, Any]:
     content = fact.get("content") or {}
     confidence = float(fact.get("confidence", 0.0))
-    recency = _recency_score(fact.get("last_seen_at") or fact.get("first_seen_at"))
-    score = _hybrid_score(
-        lexical=lexical_meta["score"],
-        vector=vector_score,
-        recency=recency,
-        confidence=confidence,
-        weights=(0.35, 0.35, 0.15, 0.15),
-    )
+    recency = recency_score(fact.get("last_seen_at") or fact.get("first_seen_at"))
+    score = hybrid_score(lexical=lexical_meta["score"], vector=vector_score, recency=recency, confidence=confidence, weights=(0.35, 0.35, 0.15, 0.15))
     return {
         "type": "continuity_note",
         "id": str(fact["id"]),
@@ -563,40 +418,29 @@ def _build_continuity_item(
         "summary": content.get("summary") or content.get("evidence", {}).get("raw_evidence"),
         "confidence": confidence,
         "score": score,
-        "source_refs": _source_refs_for_fact(fact, outbox_rows),
-        "evidence_preview": _truncate(content.get("evidence", {}).get("raw_evidence") or content.get("summary") or ""),
+        "source_refs": source_refs_for_fact(fact, outbox_rows),
+        "evidence_preview": truncate(content.get("evidence", {}).get("raw_evidence") or content.get("summary") or ""),
         "occurred_at": str(fact.get("last_seen_at") or fact.get("first_seen_at") or ""),
         "metadata": {
             "lane": "continuity",
             "derived": True,
             "fact_type": fact.get("fact_type"),
-            "open_loop_status": _open_loop_status(fact),
-            "linked_people": _linked_entities(content)["people"],
-            "linked_projects": _linked_entities(content)["projects"],
-            "linked_topics": _linked_entities(content)["topics"],
+            "open_loop_status": open_loop_status(fact),
+            "linked_people": linked_entities(content)["people"],
+            "linked_projects": linked_entities(content)["projects"],
+            "linked_topics": linked_entities(content)["topics"],
             "lexical_score": round(lexical_meta["score"], 4),
             "vector_score": round(vector_score, 4),
             "recency_score": round(recency, 4),
         },
+        "evidence": {"match_reasons": [], "lane_hits": ["thread"]},
     }
 
 
-def _build_timeline_item(
-    event: dict[str, Any],
-    *,
-    lexical_meta: dict[str, Any],
-    vector_score: float,
-    related_entities: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
+def build_timeline_item(event: dict[str, Any], *, lexical_meta: dict[str, Any], vector_score: float, related_entities: dict[str, list[str]] | None = None) -> dict[str, Any]:
     confidence = float(event.get("confidence", 0.0))
-    recency = _recency_score(event.get("observed_at") or event.get("occurred_at"))
-    score = _hybrid_score(
-        lexical=lexical_meta["score"],
-        vector=vector_score,
-        recency=recency,
-        confidence=confidence,
-        weights=(0.35, 0.40, 0.15, 0.10),
-    )
+    recency = recency_score(event.get("observed_at") or event.get("occurred_at"))
+    score = hybrid_score(lexical=lexical_meta["score"], vector=vector_score, recency=recency, confidence=confidence, weights=(0.35, 0.40, 0.15, 0.10))
     return {
         "type": "timeline_event",
         "id": str(event["id"]),
@@ -604,8 +448,8 @@ def _build_timeline_item(
         "summary": event.get("summary"),
         "confidence": confidence,
         "score": score,
-        "source_refs": _source_refs_for_timeline(event),
-        "evidence_preview": _truncate(event.get("summary") or event.get("title") or ""),
+        "source_refs": source_refs_for_timeline(event),
+        "evidence_preview": truncate(event.get("summary") or event.get("title") or ""),
         "occurred_at": str(event.get("occurred_at") or event.get("observed_at") or ""),
         "metadata": {
             "lane": "continuity",
@@ -618,39 +462,27 @@ def _build_timeline_item(
             "vector_score": round(vector_score, 4),
             "recency_score": round(recency, 4),
         },
+        "evidence": {"match_reasons": [], "lane_hits": ["timeline"]},
     }
 
 
-def _strong_fact_match(item: dict[str, Any]) -> bool:
-    return (
-        float(item.get("confidence", 0.0)) > 0.8
-        and item.get("score", 0.0) >= 0.25
-        and (
-            item.get("metadata", {}).get("lexical_score", 0.0) >= 0.05
-            or item.get("metadata", {}).get("vector_score", 0.0) >= 0.82
-        )
-    )
+def strong_fact_match(item: dict[str, Any]) -> bool:
+    return float(item.get("confidence", 0.0)) > 0.8 and item.get("score", 0.0) >= 0.25 and (item.get("metadata", {}).get("lexical_score", 0.0) >= 0.05 or item.get("metadata", {}).get("vector_score", 0.0) >= 0.82)
 
 
-def _include_candidate(lexical_score: float, vector_score: float, hybrid_score: float) -> bool:
+def include_candidate(lexical_score: float, vector_score: float, hybrid_score_value: float) -> bool:
     if lexical_score <= 0 and vector_score <= 0:
         return False
-    return hybrid_score >= 0.22 or lexical_score >= 0.12 or vector_score >= 0.72
+    return hybrid_score_value >= 0.22 or lexical_score >= 0.12 or vector_score >= 0.72
 
 
-async def recall(
-    database: Database,
-    *,
-    user_id: str,
-    query: str,
-    limit: int = 5,
-    recall_type: str | None = None,
-) -> dict[str, Any]:
-    return await recall_v2(
+async def fetch_vector_rows(database: Database, *, user_id: str, query: str, limit: int, query_tokens: list[str]) -> list[dict[str, Any]]:
+    if not any(len(token) >= 3 for token in query_tokens):
+        return []
+    return await embeddings.search_retrieval_embeddings(
         database,
         user_id=user_id,
         query=query,
-        limit=limit,
-        recall_type=recall_type,
-        reranker_name="noop",
+        source_types=["confirmed_fact", "session_summary", "source_archive_chunk", "timeline_event"],
+        limit=max(limit * 8, 24),
     )
