@@ -15,13 +15,17 @@ from core.items import (
     archive_reminder_manual,
     archive_task_manual,
     complete_task_manual,
+    convert_thread_to_reminder,
+    convert_thread_to_task,
     create_action,
     create_event,
     create_habit_manual,
     create_reminder_manual,
     create_task_manual,
+    dismiss_thread,
     delete_event_manual,
     due_tasks,
+    explain_thread,
     get_event_manual,
     get_habit_manual,
     get_reminder_manual,
@@ -37,6 +41,7 @@ from core.items import (
     dismiss_reminder_manual,
     record_habit_completion,
     resolve_thread,
+    snooze_thread,
     sophie_cancel_confirmed_event,
     sophie_create_confirmed_action,
     sophie_create_confirmed_event,
@@ -44,6 +49,7 @@ from core.items import (
     sophie_patch_confirmed_action,
     sophie_patch_confirmed_event,
     todays_schedule,
+    update_thread_links,
     update_habit_manual,
     update_reminder_manual,
     update_task_manual,
@@ -180,6 +186,33 @@ class FrontendManualMutationRequest(BaseModel):
     sourceRef: str | None = None
     idempotencyKey: str | None = None
     createdFrom: str
+    completedAt: str | None = None
+
+
+class ThreadSnoozeRequest(FrontendManualMutationRequest):
+    snoozedUntil: str
+
+
+class ThreadConvertRequest(FrontendManualMutationRequest):
+    title: str | None = None
+    notes: str | None = None
+    dueAt: str | None = None
+    remindAt: str | None = None
+    timezone: str | None = None
+    priority: str | None = None
+
+
+class ThreadLinksObject(BaseModel):
+    factIds: list[str] = Field(default_factory=list)
+    timelineEventIds: list[str] = Field(default_factory=list)
+    sourceArchiveIds: list[str] = Field(default_factory=list)
+    outboxIds: list[str] = Field(default_factory=list)
+
+
+class ThreadLinksPatchRequest(FrontendManualMutationRequest):
+    linkType: str = "relates_to"
+    add: ThreadLinksObject = Field(default_factory=ThreadLinksObject)
+    remove: ThreadLinksObject = Field(default_factory=ThreadLinksObject)
     completedAt: str | None = None
 
 
@@ -992,6 +1025,136 @@ async def patch_thread_resolve(
     from uuid import UUID
 
     return await resolve_thread(database, user_id=user_id, item_id=UUID(item_id))
+
+
+@app.post("/v3/threads/{item_id}/dismiss")
+async def dismiss_thread_endpoint(
+    item_id: str,
+    request: FrontendManualMutationRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await dismiss_thread(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.post("/v3/threads/{item_id}/snooze")
+async def snooze_thread_endpoint(
+    item_id: str,
+    request: ThreadSnoozeRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await snooze_thread(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        snoozed_until=request.snoozedUntil,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.post("/v3/threads/{item_id}/convert-to-task")
+async def convert_thread_to_task_endpoint(
+    item_id: str,
+    request: ThreadConvertRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await convert_thread_to_task(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        title=request.title,
+        notes=request.notes,
+        due_at=request.dueAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey or f"thread-task:{item_id}",
+    )
+
+
+@app.post("/v3/threads/{item_id}/convert-to-reminder")
+async def convert_thread_to_reminder_endpoint(
+    item_id: str,
+    request: ThreadConvertRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await convert_thread_to_reminder(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        title=request.title,
+        notes=request.notes,
+        remind_at=request.remindAt,
+        timezone_name=request.timezone,
+        priority=request.priority,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey or f"thread-reminder:{item_id}",
+    )
+
+
+@app.patch("/v3/threads/{item_id}/links")
+async def patch_thread_links_endpoint(
+    item_id: str,
+    request: ThreadLinksPatchRequest,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await update_thread_links(
+        database,
+        user_id=request.userId,
+        item_id=UUID(item_id),
+        additions={
+            "fact_ids": [UUID(value) for value in request.add.factIds],
+            "timeline_event_ids": [UUID(value) for value in request.add.timelineEventIds],
+            "source_archive_ids": [UUID(value) for value in request.add.sourceArchiveIds],
+            "outbox_ids": [UUID(value) for value in request.add.outboxIds],
+        },
+        removals={
+            "fact_ids": [UUID(value) for value in request.remove.factIds],
+            "timeline_event_ids": [UUID(value) for value in request.remove.timelineEventIds],
+            "source_archive_ids": [UUID(value) for value in request.remove.sourceArchiveIds],
+            "outbox_ids": [UUID(value) for value in request.remove.outboxIds],
+        },
+        link_type=request.linkType,
+        screen=request.createdFrom,
+        source_type=request.sourceType or "frontend_manual",
+        source_ref=request.sourceRef,
+        idempotency_key=request.idempotencyKey,
+    )
+
+
+@app.get("/v3/threads/{item_id}/explanation")
+async def get_thread_explanation(
+    item_id: str,
+    userId: str,
+    database: Database = Depends(get_database),
+):
+    from uuid import UUID
+
+    return await explain_thread(database, user_id=userId, item_id=UUID(item_id))
 
 
 @app.post("/v3/memory-controls")

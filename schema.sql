@@ -66,7 +66,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-    CREATE TYPE event_type AS ENUM ('task_confirmed', 'event_confirmed', 'fact_learned', 'state_change', 'session', 'outreach_sent', 'item_dismissed', 'user_correction', 'relationship_update', 'task_completed', 'reminder_dismissed', 'habit_completed', 'habit_missed', 'habit_partial', 'thread_resolved', 'task_created', 'reminder_created', 'event_created', 'task_archived', 'event_updated', 'event_cancelled', 'task_updated', 'reminder_updated', 'reminder_archived', 'habit_created', 'habit_updated', 'habit_archived');
+    CREATE TYPE event_type AS ENUM ('task_confirmed', 'event_confirmed', 'fact_learned', 'state_change', 'session', 'outreach_sent', 'item_dismissed', 'user_correction', 'relationship_update', 'task_completed', 'reminder_dismissed', 'habit_completed', 'habit_missed', 'habit_partial', 'thread_resolved', 'thread_dismissed', 'thread_snoozed', 'thread_progressed', 'thread_link_updated', 'task_created', 'reminder_created', 'event_created', 'task_archived', 'event_updated', 'event_cancelled', 'task_updated', 'reminder_updated', 'reminder_archived', 'habit_created', 'habit_updated', 'habit_archived');
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
@@ -76,6 +76,10 @@ ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_completed';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_missed';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'habit_partial';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'thread_resolved';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'thread_dismissed';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'thread_snoozed';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'thread_progressed';
+ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'thread_link_updated';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'task_created';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'reminder_created';
 ALTER TYPE event_type ADD VALUE IF NOT EXISTS 'event_created';
@@ -184,6 +188,12 @@ CREATE TABLE IF NOT EXISTS confirmed_facts (
     cancelled_at TIMESTAMP,
     priority TEXT,
     follow_up_needed BOOLEAN DEFAULT FALSE,
+    thread_type TEXT,
+    actionability TEXT,
+    next_move TEXT,
+    last_progressed_at TIMESTAMP,
+    last_resurfaced_at TIMESTAMP,
+    snoozed_until TIMESTAMP,
     user_corrected BOOLEAN,
     correction_note TEXT,
     expires_at TIMESTAMP
@@ -208,6 +218,12 @@ ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;
 ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
 ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS priority TEXT;
 ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS follow_up_needed BOOLEAN DEFAULT FALSE;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS thread_type TEXT;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS actionability TEXT;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS next_move TEXT;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS last_progressed_at TIMESTAMP;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS last_resurfaced_at TIMESTAMP;
+ALTER TABLE confirmed_facts ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMP;
 
 CREATE TABLE IF NOT EXISTS session_summaries (
     id UUID PRIMARY KEY,
@@ -290,6 +306,24 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     confidence FLOAT
 );
 
+CREATE TABLE IF NOT EXISTS fact_links (
+    id UUID PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    from_fact_id UUID NOT NULL REFERENCES confirmed_facts(id),
+    to_fact_id UUID NULL REFERENCES confirmed_facts(id),
+    to_timeline_event_id UUID NULL REFERENCES timeline_events(id),
+    to_source_archive_id UUID NULL REFERENCES source_archive(id),
+    to_outbox_id UUID NULL REFERENCES outbox(id),
+    link_type TEXT NOT NULL,
+    confidence FLOAT,
+    evidence JSONB DEFAULT '{}'::jsonb,
+    created_from JSONB DEFAULT '{}'::jsonb,
+    source_type TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS retrieval_embeddings (
     id UUID PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -328,6 +362,12 @@ CREATE INDEX IF NOT EXISTS idx_confirmed_facts_completed_at ON confirmed_facts(c
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_cancelled_at ON confirmed_facts(cancelled_at);
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_priority ON confirmed_facts(priority);
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_follow_up_needed ON confirmed_facts(follow_up_needed);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_thread_type ON confirmed_facts(thread_type);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_actionability ON confirmed_facts(actionability);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_next_move ON confirmed_facts(next_move);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_last_progressed_at ON confirmed_facts(last_progressed_at);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_last_resurfaced_at ON confirmed_facts(last_resurfaced_at);
+CREATE INDEX IF NOT EXISTS idx_confirmed_facts_snoozed_until ON confirmed_facts(snoozed_until);
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_source_type ON confirmed_facts(source_type);
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_primary_source_id ON confirmed_facts(primary_source_id);
 CREATE INDEX IF NOT EXISTS idx_confirmed_facts_conversation_id ON confirmed_facts(conversation_id);
@@ -344,6 +384,14 @@ CREATE INDEX IF NOT EXISTS idx_candidates_conversation_id ON candidates(conversa
 CREATE INDEX IF NOT EXISTS idx_candidates_follow_up_needed ON candidates(follow_up_needed);
 CREATE INDEX IF NOT EXISTS idx_candidates_structured_content ON candidates USING GIN(structured_content);
 CREATE INDEX IF NOT EXISTS idx_candidates_provenance ON candidates USING GIN(provenance);
+CREATE INDEX IF NOT EXISTS idx_fact_links_user_id ON fact_links(user_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_from_fact_id ON fact_links(from_fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_to_fact_id ON fact_links(to_fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_to_timeline_event_id ON fact_links(to_timeline_event_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_to_source_archive_id ON fact_links(to_source_archive_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_to_outbox_id ON fact_links(to_outbox_id);
+CREATE INDEX IF NOT EXISTS idx_fact_links_link_type ON fact_links(link_type);
+CREATE INDEX IF NOT EXISTS idx_fact_links_is_active ON fact_links(is_active);
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_embeddings_user_id ON retrieval_embeddings(user_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_embeddings_source_type ON retrieval_embeddings(source_type);

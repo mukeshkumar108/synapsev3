@@ -105,8 +105,21 @@ def build_structured_content(
         else None,
         "thread": {
             "follow_up_needed": follow_up_needed,
+            "thread_type": metadata.get("thread_type") or agent_item.get("thread_type"),
+            "actionability": metadata.get("actionability") or agent_item.get("actionability"),
+            "next_move": metadata.get("next_move") or agent_item.get("next_move"),
             "waiting_on": metadata.get("waiting_on") or agent_item.get("waiting_on"),
             "open_loop_status": metadata.get("open_loop_status") or agent_item.get("open_loop_status") or "active",
+            "suggested_actions": metadata.get("suggested_actions") or agent_item.get("suggested_actions") or [],
+            "blocked_by": metadata.get("blocked_by") or agent_item.get("blocked_by"),
+            "resolution_condition": metadata.get("resolution_condition") or agent_item.get("resolution_condition"),
+            "resolution_summary": metadata.get("resolution_summary") or agent_item.get("resolution_summary"),
+            "surface_reason": metadata.get("surface_reason") or agent_item.get("surface_reason"),
+            "evidence": metadata.get("thread_evidence") or agent_item.get("thread_evidence") or {},
+            "capability_assessment": metadata.get("capability_assessment") or agent_item.get("capability_assessment"),
+            "last_progressed_at": metadata.get("last_progressed_at") or agent_item.get("last_progressed_at"),
+            "last_resurfaced_at": metadata.get("last_resurfaced_at") or metadata.get("last_surfaced_at") or agent_item.get("last_resurfaced_at"),
+            "snoozed_until": metadata.get("snoozed_until") or agent_item.get("snoozed_until"),
         }
         if kind == "thread"
         else None,
@@ -148,6 +161,12 @@ def extract_operational_fields(
         "conversation_id": provenance.get("conversation_id"),
         "created_from": deepcopy(provenance.get("created_from") or {}),
         "follow_up_needed": bool((structured_content.get("thread") or {}).get("follow_up_needed")),
+        "thread_type": (structured_content.get("thread") or {}).get("thread_type"),
+        "actionability": (structured_content.get("thread") or {}).get("actionability"),
+        "next_move": (structured_content.get("thread") or {}).get("next_move"),
+        "last_progressed_at": (structured_content.get("thread") or {}).get("last_progressed_at"),
+        "last_resurfaced_at": (structured_content.get("thread") or {}).get("last_resurfaced_at"),
+        "snoozed_until": (structured_content.get("thread") or {}).get("snoozed_until"),
         "kind": structured_content.get("kind"),
     }
 

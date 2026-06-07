@@ -13,7 +13,7 @@ from core.operational import apply_lifecycle_timestamp, extract_operational_fiel
 CREATE_MERGE_UPDATE = {"CREATE", "MERGE", "UPDATE"}
 CONFIRMED_FACT_TYPES = {"task", "event", "preference", "relationship", "state", "thread", "identity"}
 RELATIVE_TIME_MARKERS = ("tomorrow", "today", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "weekend", "next week")
-OPEN_LOOP_STATES = {"active", "unresolved", "resolved", "dismissed", "stale", "deferred"}
+OPEN_LOOP_STATES = {"active", "unresolved", "resolved", "dismissed", "stale", "deferred", "snoozed"}
 
 
 def _title_for_timeline(candidate: dict[str, Any], fact_type: str) -> str:
